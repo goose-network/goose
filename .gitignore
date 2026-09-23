@@ -1,0 +1,24 @@
+# Build artifacts
+/goose
+/bin/
+*.exe
+*.test
+*.out
+
+# Go workspace
+/vendor/
+
+# Local databases / runtime state
+*.db
+*.db-journal
+*.mmdb
+qqwry.dat
+zxinc.dat
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Claude Code harness state
+.claude/
