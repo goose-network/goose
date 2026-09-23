@@ -1,21 +1,31 @@
-// Package core defines the central, dependency-free interfaces and value
-// types that every other goose package programs against. Nothing in core
-// imports another goose package: it is the seam that lets inbound, router,
-// selector, filter, metrics, stack and plugins interoperate without cycles.
+// Package core defines the central, engine-internal value types and
+// interfaces that goose's own packages program against. The shared plugin
+// contract types (Network, Location, Outbound, OutboundFactory, etc.) are now
+// owned by github.com/goose-network/goose-plugin-api and re-exported here as
+// type aliases, so core's existing API surface is preserved while the
+// canonical definitions live in the dependency-free api module. Nothing in
+// core imports another goose package: it is the seam that lets inbound,
+// router, selector, filter, metrics, stack and plugins interoperate without
+// cycles.
 package core
 
 import (
-	"context"
 	"net"
 	"time"
+
+	api "github.com/goose-network/goose-plugin-api"
 )
 
-// Network names a transport network for a target address.
-type Network string
+// Network names a transport network for a target address. It is an alias to
+// the canonical definition in the api module.
+type Network = api.Network
 
+// Re-export the network consts from the api module. Because Network is an
+// alias to api.Network (a string), these consts are untyped string constants
+// assignable to Network.
 const (
-	NetworkTCP Network = "tcp"
-	NetworkUDP Network = "udp"
+	NetworkTCP = api.NetworkTCP
+	NetworkUDP = api.NetworkUDP
 )
 
 // Metadata describes a single proxied request as it flows through the
@@ -51,59 +61,28 @@ func (m Metadata) Target() string {
 }
 
 // Location is the geographic/network location of an outbound, resolved from
-// its dial address by the geo package against an offline IP database.
-type Location struct {
-	Country     string
-	Province    string
-	City        string
-	ISP         string
-	// Raw is the original lookup record, kept for debugging/serialization.
-	Raw string
-}
+// its dial address by the geo package against an offline IP database. It is an
+// alias to the canonical definition in the api module.
+type Location = api.Location
 
-// LatencySample is one historical latency observation of an outbound.
-type LatencySample struct {
-	At      time.Time
-	Latency time.Duration
-	OK      bool
-}
+// LatencySample is one historical latency observation of an outbound. It is an
+// alias to the canonical definition in the api module.
+type LatencySample = api.LatencySample
 
 // OutboundStats is the live, in-memory performance view of an outbound,
 // maintained by the metrics/health subsystem and read by selectors/filters.
-type OutboundStats struct {
-	// RecentLatency is an exponentially-smoothed estimate of dial latency.
-	RecentLatency time.Duration
-	// SuccessRate is the fraction of recent dials that succeeded (0..1).
-	SuccessRate float64
-	// LastSeen is when this outbound was last used successfully.
-	LastSeen time.Time
-	// Samples is the raw recent window, for selectors that need it.
-	Samples []LatencySample
-}
+// It is an alias to the canonical definition in the api module.
+type OutboundStats = api.OutboundStats
 
 // Outbound is a single upstream proxy the engine can dial through. It is the
-// contract implemented by every plugin (built-in or external).
-type Outbound interface {
-	// ID is the stable, unique identifier of this outbound within the pool.
-	ID() string
-	// Protocol is the plugin name, e.g. "direct", "http", "socks5".
-	Protocol() string
-	// DialContext dials the target through this outbound. The returned
-	// connection is the first hop of the chain; the router is responsible
-	// for further chaining if configured.
-	DialContext(ctx context.Context, network Network, target string) (net.Conn, error)
-	// Address is the outbound's own dial endpoint (host:port), or empty for
-	// "direct". Used for geo-location and metrics.
-	Address() string
-	// Location returns the resolved location, or nil if unknown.
-	Location() *Location
-	// Stats returns a snapshot of recent performance.
-	Stats() OutboundStats
-}
+// contract implemented by every plugin (built-in or external). It is an alias
+// to the canonical definition in the api module.
+type Outbound = api.Outbound
 
 // OutboundFactory builds an Outbound from a plugin-specific config map. The
-// engine calls factories registered with the plugin registry.
-type OutboundFactory func(cfg map[string]any) (Outbound, error)
+// engine calls factories registered with the plugin registry. It is an alias
+// to the canonical definition in the api module.
+type OutboundFactory = api.OutboundFactory
 
 // Selector picks one outbound from a pool according to a load-balancing
 // strategy. Implementations live in internal/selector.

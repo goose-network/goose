@@ -101,6 +101,19 @@ type ChainSpec struct {
 	Layers []string `json:"layers"` // PoolIDs, in order
 }
 
+// ProviderSpec configures a dynamic outbound provider: a plugin that sources
+// its own proxy server configs and feeds them into a managed pool. The engine
+// instantiates the provider from (Provider, Config), polls Outbounds, and
+// merges the result into the store as managed outbounds plus a pool named
+// PoolID. This is how a plugin like Psiphon (which fetches and refreshes a
+// remote server list) gets its servers into the engine's pool.
+type ProviderSpec struct {
+	ID       string         `json:"id"`
+	Provider string         `json:"provider"` // plugin name, e.g. "psiphon"
+	PoolID   string         `json:"pool_id"`  // managed pool to populate
+	Config   map[string]any `json:"config"`
+}
+
 // Store is the concurrency-safe live configuration store.
 type Store struct {
 	mu       sync.RWMutex
@@ -109,6 +122,12 @@ type Store struct {
 	outbounds map[string]*OutboundSpec
 	pools    map[string]*Pool
 	chains   map[string]*ChainSpec
+	providers map[string]*ProviderSpec
+	// managedOutbounds records outbound IDs owned by a provider, so
+	// SetProviderOutbounds can replace a provider's full set atomically
+	// (adding new, removing stale) without touching user-configured static
+	// outbounds. Keyed by provider ID.
+	managedOutbounds map[string]map[string]struct{}
 	// version is bumped on every mutation; subscribers use it to detect
 	// changes and reconcile.
 	version  uint64
@@ -118,11 +137,13 @@ type Store struct {
 // NewStore returns an empty store with sensible defaults.
 func NewStore() *Store {
 	return &Store{
-		engine:    Engine{Stack: "system", API: APIConfig{Listen: "127.0.0.1:9090"}, DB: "goose.db"},
-		inbounds:  map[string]*Inbound{},
-		outbounds: map[string]*OutboundSpec{},
-		pools:     map[string]*Pool{},
-		chains:    map[string]*ChainSpec{},
+		engine:           Engine{Stack: "system", API: APIConfig{Listen: "127.0.0.1:9090"}, DB: "goose.db"},
+		inbounds:         map[string]*Inbound{},
+		outbounds:        map[string]*OutboundSpec{},
+		pools:            map[string]*Pool{},
+		chains:           map[string]*ChainSpec{},
+		providers:        map[string]*ProviderSpec{},
+		managedOutbounds: map[string]map[string]struct{}{},
 	}
 }
 
@@ -275,6 +296,100 @@ func (s *Store) DeleteChain(id string) bool {
 	delete(s.chains, id)
 	s.bumpLocked()
 	return true
+}
+
+// --- Providers ---
+
+func (s *Store) Providers() []*ProviderSpec {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*ProviderSpec, 0, len(s.providers))
+	for _, v := range s.providers {
+		out = append(out, v)
+	}
+	return out
+}
+func (s *Store) Provider(id string) (*ProviderSpec, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.providers[id]
+	return v, ok
+}
+func (s *Store) SetProvider(p *ProviderSpec) {
+	s.mu.Lock()
+	s.providers[p.ID] = p
+	s.bumpLocked()
+	s.mu.Unlock()
+}
+func (s *Store) DeleteProvider(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.providers[id]; !ok {
+		return false
+	}
+	delete(s.providers, id)
+	// also drop any managed outbounds + pool this provider owned
+	s.clearManagedLocked(id)
+	delete(s.pools, id)
+	s.bumpLocked()
+	return true
+}
+
+// SetProviderOutbounds replaces the full set of outbounds owned by providerID
+// with specs, and (re)builds the managed pool poolID to reference them. This
+// is the "get proxy server config from plugin into pool" seam: the engine
+// calls it with the result of Provider.Outbounds. It bumps the config version
+// exactly once so the router rebuilds with the new pool.
+//
+// Outbounds whose IDs already exist (from any source) are overwritten; the
+// provider takes ownership of the given IDs. Previously-owned IDs not present
+// in specs are removed (but only if still owned by this provider, so a user
+// re-claiming an ID by hand is respected). The pool is created if missing.
+func (s *Store) SetProviderOutbounds(providerID, poolID string, specs []*OutboundSpec) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	prev := s.managedOutbounds[providerID]
+	next := make(map[string]struct{}, len(specs))
+
+	// add/update each spec
+	for _, spec := range specs {
+		s.outbounds[spec.ID] = spec
+		next[spec.ID] = struct{}{}
+	}
+	// remove stale outbounds previously owned by this provider
+	for id := range prev {
+		if _, keep := next[id]; keep {
+			continue
+		}
+		delete(s.outbounds, id)
+	}
+	s.managedOutbounds[providerID] = next
+
+	// (re)build the managed pool to reference exactly these outbounds.
+	ids := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		ids = append(ids, spec.ID)
+	}
+	pool, ok := s.pools[poolID]
+	if !ok {
+		pool = &Pool{ID: poolID}
+		s.pools[poolID] = pool
+	}
+	pool.OutboundIDs = ids
+	// leave any user-configured filters/selector on the pool intact; if the
+	// pool is brand-new and has no selector, the router falls back to a
+	// round-robin-style fallback selector.
+
+	s.bumpLocked()
+}
+
+// clearManagedLocked drops all outbounds owned by providerID. Caller holds s.mu.
+func (s *Store) clearManagedLocked(providerID string) {
+	for id := range s.managedOutbounds[providerID] {
+		delete(s.outbounds, id)
+	}
+	delete(s.managedOutbounds, providerID)
 }
 
 // --- change subscription ---

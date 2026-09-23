@@ -70,14 +70,18 @@ func loadConfig(store *config.Store, path string) error {
 	for _, c := range doc.Chains {
 		store.SetChain(c)
 	}
+	for _, p := range doc.Providers {
+		store.SetProvider(p)
+	}
 	return nil
 }
 
 // configDoc is the on-disk config shape.
 type configDoc struct {
-	Engine    config.Engine        `json:"engine"`
-	Inbounds  []*config.Inbound    `json:"inbounds"`
+	Engine    config.Engine          `json:"engine"`
+	Inbounds  []*config.Inbound      `json:"inbounds"`
 	Outbounds []*config.OutboundSpec `json:"outbounds"`
-	Pools     []*config.Pool       `json:"pools"`
-	Chains    []*config.ChainSpec  `json:"chains"`
+	Pools     []*config.Pool         `json:"pools"`
+	Chains    []*config.ChainSpec    `json:"chains"`
+	Providers []*config.ProviderSpec `json:"providers"`
 }

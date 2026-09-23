@@ -18,6 +18,7 @@ import (
 	"github.com/goose-network/goose/internal/geo"
 	"github.com/goose-network/goose/internal/inbound"
 	"github.com/goose-network/goose/internal/metrics"
+	"github.com/goose-network/goose/internal/provider"
 	"github.com/goose-network/goose/internal/router"
 	"github.com/goose-network/goose/internal/stack"
 )
@@ -38,6 +39,7 @@ type Engine struct {
 	stack   stack.Stack
 	router  *router.Router
 	api     *api.Server
+	providers *provider.Manager
 
 	mu        sync.Mutex
 	listeners map[string]*listenerEntry // keyed by inbound id
@@ -83,6 +85,18 @@ func New(cfg *config.Store) (*Engine, error) {
 
 	// initial reconcile of listeners
 	e.reconcile()
+
+	// Start dynamic outbound providers. Each provider polls/refreshes its
+	// server list and merges outbounds into a managed pool, bumping the config
+	// version so the router rebuilds. Done after the initial reconcile so the
+	// first provider poll triggers a rebuild with the router already wired.
+	e.providers = provider.New(cfg)
+	if err := e.providers.Start(); err != nil {
+		// A failing provider shouldn't fatal the whole engine; the static
+		// config (inbounds, pools, chains) can still serve traffic. Log and
+		// continue.
+		fmt.Printf("engine: provider start: %v\n", err)
+	}
 
 	// subscribe to config changes for hot reload
 	go e.watch(cfg.Subscribe())
@@ -241,6 +255,9 @@ func (e *Engine) Close() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = e.apiSrv.Shutdown(ctx)
+		}
+		if e.providers != nil {
+			_ = e.providers.Close()
 		}
 		_ = e.ms.Close()
 		_ = e.stack.Close()

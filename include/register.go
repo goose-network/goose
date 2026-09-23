@@ -5,6 +5,7 @@
 package include
 
 import (
+	_ "github.com/goose-network/goose-plugin-psiphon"
 	_ "github.com/goose-network/goose/plugins/direct"
 	_ "github.com/goose-network/goose/plugins/http"
 	_ "github.com/goose-network/goose/plugins/socks5"
