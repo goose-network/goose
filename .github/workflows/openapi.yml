@@ -1,17 +1,13 @@
 name: OpenAPI
 
-# Regenerates internal/api/docs/swagger.json from the swag annotations in
-# internal/api/api.go, verifies it matches what is committed (so the spec
-# never drifts), and notifies goose-sdk-ts when the spec changes on main so
-# its generator workflow picks it up.
+# On every push to main: regenerate internal/api/docs/swagger.json from the
+# swag annotations in internal/api/api.go, verify it matches what is
+# committed (so the spec never drifts), then generate the TypeScript SDK from
+# this commit's spec and push it straight to goose-network/goose-sdk-ts.
+# PRs only run the freshness check, and only when API-relevant files change.
 on:
   push:
     branches: [main]
-    paths:
-      - "internal/api/**"
-      - ".github/workflows/openapi.yml"
-      - "Makefile"
-      - "go.mod"
   pull_request:
     paths:
       - "internal/api/**"
@@ -25,7 +21,9 @@ permissions:
 
 concurrency:
   group: openapi-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR checks are cancelled; pushes to main are serialized so an
+  # older run cannot push an older SDK after a newer one has landed.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   generate:
@@ -69,24 +67,54 @@ jobs:
       - name: Test
         run: go test ./internal/api/...
 
-  notify-sdk:
-    # Tell goose-sdk-ts to regenerate its SDK from the new spec. Only fires
-    # on main; PAT auth because repository_dispatch needs write access to
-    # the (separate) SDK repo.
+  push-sdk:
+    # Generate the TS SDK from this commit's spec and push the result to
+    # the main branch of goose-network/goose-sdk-ts. Cross-repo push needs
+    # a PAT (the workflow's own GITHUB_TOKEN cannot write another repo);
+    # GH_TOKEN is the org-level secret.
     needs: generate
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch generate workflow on goose-sdk-ts
+      - name: Check out goose-sdk-ts
+        uses: actions/checkout@v4
+        with:
+          repository: goose-network/goose-sdk-ts
+          token: ${{ secrets.GH_TOKEN }}
+          # Carry the caller's identity into the SDK commits.
+          persist-credentials: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Regenerate SDK from this commit's spec
         env:
-          SDK_DISPATCH_TOKEN: ${{ secrets.SDK_DISPATCH_TOKEN }}
+          # Pin the ref so the SDK records exactly which goose commit it
+          # was generated from, not whatever lands on main meanwhile.
+          GOOSE_SPEC_REF: ${{ github.sha }}
+        run: npm run generate
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Push regenerated SDK to main
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          if [ -z "$SDK_DISPATCH_TOKEN" ]; then
-            echo "SDK_DISPATCH_TOKEN not set; skipping SDK notification."
+          git config user.name "goose-openapi-bot"
+          git config user.email "noreply@goose-network.github.io"
+          if git diff --quiet; then
+            echo "SDK already up to date with $GOOSE_SPEC_REF; nothing to push."
             exit 0
           fi
-          curl -fsS -X POST \
-            -H "Authorization: Bearer $SDK_DISPATCH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/goose-network/goose-sdk-ts/dispatches" \
-            -d '{"event_type":"openapi-spec-changed","client_payload":{"ref":"'"${GITHUB_SHA}"'"}}'
+          git add -A
+          git commit -m "Regenerate SDK from goose OpenAPI spec $GOOSE_SPEC_REF"
+          git push origin main
+          echo "Pushed regenerated SDK to goose-sdk-ts@main."
