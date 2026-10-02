@@ -1,5 +1,7 @@
 SHELL := /bin/bash
 
+# swag is pinned (CI installs v1.16.6; .github/workflows/openapi.yml
+# verifies the committed spec matches that version's output).
 SWAG        := $(shell command -v swag 2>/dev/null || echo $(HOME)/go/bin/swag)
 SWAG_FLAGS  := init -g api.go -d . --ot json -o ./docs --parseDependency -q
 OPENAPI_DIR := internal/api/docs
