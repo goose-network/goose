@@ -553,7 +553,7 @@ func (s *Server) chains(w http.ResponseWriter, r *http.Request) {
 // listMetrics godoc
 //
 //	@Summary      List recent request metrics
-//	@Description  Returns up to n recent proxied-request records, newest first. n defaults to 100; values above 10000 are capped; invalid values fall back to the default.
+//	@Description  Returns up to n recent proxied-request records, newest first, each carrying the chain that served it. n defaults to 100; values above 10000 are capped; invalid values fall back to the default.
 //	@Tags         metrics
 //	@Produce      json
 //	@Param        n query int false "Number of records to return (default 100, max 10000)" default(100) maximum(10000)
