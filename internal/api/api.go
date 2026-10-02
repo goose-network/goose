@@ -2,6 +2,10 @@
 // create/list/delete inbounds, outbounds, pools, and chains, import proxies,
 // and query metrics — all backed by the live config store. The server
 // optionally authenticates with a bearer token.
+//
+// The OpenAPI 2.0 (Swagger) document for this API is generated from the swag
+// annotations below by `make openapi` and committed at
+// internal/api/docs/openapi.json. It feeds the TypeScript SDK generator.
 package api
 
 import (
@@ -16,7 +20,24 @@ import (
 	"github.com/goose-network/goose/internal/metrics"
 )
 
-// maxBodyBytes caps the size of an admin-API request body to prevent memory
+//	@title			goose admin API
+//	@version		1.0
+//	@description	Admin API of the goose proxy-pool engine: create and manage inbounds (http/socks5 listeners), outbounds (proxy plugins), pools and chains, and inspect request metrics.
+//
+//	@tag.name		engine
+//	@tag.description	Engine-level configuration (network stack, API settings, DB path)
+//	@tag.name		inbounds
+//	@tag.description	Inbound listeners clients connect to
+//	@tag.name		outbounds
+//	@tag.description	Outbound proxy specs the engine can dial through
+//	@tag.name		pools
+//	@tag.description	Named outbound sets with filters + selection strategy
+//	@tag.name		chains
+//	@tag.description	Ordered proxy chains of pool layers
+//	@tag.name		metrics
+//	@tag.description	Recent proxied-request records
+
+// maxBodyBytes caps the size of an admin-API request body to prevent memory caps the size of an admin-API request body to prevent memory
 // exhaustion from oversized POST/PUT payloads.
 const maxBodyBytes = 1 << 20 // 1 MiB
 
@@ -103,8 +124,25 @@ func resourceID(path, prefix string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(path, prefix), "/")
 }
 
+// errResponse is the error body shape used by every endpoint that rejects a
+// request (400 bad JSON / validation, 401 unauthorized, 404 missing, 405
+// wrong method). Declared once so the OpenAPI document can reference it.
+type errResponse struct {
+	// Error is a short, human-readable reason for the rejection.
+	Error string `json:"error" example:"missing id"`
+}
+
 // --- engine ---
 
+// engine godoc
+//
+//	@Summary      Get engine configuration
+//	@Description  Returns the engine-level configuration: network stack selection, admin API settings, metrics DB path and offline geo database settings.
+//	@Tags         engine
+//	@Produce      json
+//	@Success      200 {object} config.Engine
+//	@Failure      401 {object} errResponse
+//	@Router       /api/engine [get]
 func (s *Server) engine(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -112,19 +150,32 @@ func (s *Server) engine(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut, http.MethodPost:
 		var e config.Engine
 		if err := readJSON(r, &e); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
 		if err := validateEngine(e); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
 		s.cfg.SetEngine(e)
 		writeJSON(w, e, http.StatusOK)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
 }
+
+// updateEngine godoc
+//
+//	@Summary      Update engine configuration
+//	@Description  Replaces the engine-level configuration (network stack, admin API settings, metrics DB path, geo database). The stack must be one of "system" or "gvisor" (or empty). Changes are applied live: the engine reconciles listeners on the next config version bump.
+//	@Tags         engine
+//	@Accept       json
+//	@Produce      json
+//	@Param        engine body config.Engine true "Engine configuration"
+//	@Success      200 {object} config.Engine
+//	@Failure      400 {object} errResponse
+//	@Failure      401 {object} errResponse
+//	@Router       /api/engine [put]
 
 // validateEngine sanity-checks an engine config before persisting it, so
 // invalid values (e.g. an unknown stack type) are rejected at the API with a
@@ -140,6 +191,52 @@ func validateEngine(e config.Engine) error {
 
 // --- inbounds ---
 
+// listInbounds godoc
+//
+//	@Summary      List inbounds
+//	@Description  Returns all configured inbound listeners.
+//	@Tags         inbounds
+//	@Produce      json
+//	@Success      200 {array} config.Inbound
+//	@Failure      401 {object} errResponse
+//	@Router       /api/inbounds [get]
+//
+// getInbound godoc
+//
+//	@Summary      Get an inbound
+//	@Description  Returns the inbound listener with the given id.
+//	@Tags         inbounds
+//	@Produce      json
+//	@Param        id path string true "Inbound id"
+//	@Success      200 {object} config.Inbound
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/inbounds/{id} [get]
+//
+// createInbound godoc
+//
+//	@Summary      Create or replace an inbound
+//	@Description  Creates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.
+//	@Tags         inbounds
+//	@Accept       json
+//	@Produce      json
+//	@Param        id path string false "Inbound id (ignored unless the body omits it)"
+//	@Param        inbound body config.Inbound true "Inbound to create"
+//	@Success      201 {object} config.Inbound
+//	@Failure      400 {object} errResponse
+//	@Failure      401 {object} errResponse
+//	@Router       /api/inbounds [post]
+//
+// deleteInbound godoc
+//
+//	@Summary      Delete an inbound
+//	@Description  Removes the inbound listener with the given id and stops it.
+//	@Tags         inbounds
+//	@Param        id path string true "Inbound id"
+//	@Success      204 "No content"
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/inbounds/{id} [delete]
 func (s *Server) inbounds(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/inbounds")
 	switch {
@@ -149,12 +246,12 @@ func (s *Server) inbounds(w http.ResponseWriter, r *http.Request) {
 		if in, ok := s.cfg.Inbound(id); ok {
 			writeJSON(w, in, http.StatusOK)
 		} else {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
 		}
 	case r.Method == http.MethodPost || r.Method == http.MethodPut:
 		var in config.Inbound
 		if err := readJSON(r, &in); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
 		if id != "" {
@@ -162,13 +259,13 @@ func (s *Server) inbounds(w http.ResponseWriter, r *http.Request) {
 			// any) must match. This prevents POST /api/inbounds/foo from
 			// silently creating/updating a different resource (/bar).
 			if in.ID != "" && in.ID != id {
-				http.Error(w, "id in body does not match URL", http.StatusBadRequest)
+				writeJSON(w, errResponse{"id in body does not match URL"}, http.StatusBadRequest)
 				return
 			}
 			in.ID = id
 		}
 		if in.ID == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
+			writeJSON(w, errResponse{"missing id"}, http.StatusBadRequest)
 			return
 		}
 		s.cfg.SetInbound(&in)
@@ -177,15 +274,61 @@ func (s *Server) inbounds(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.DeleteInbound(id) {
 			w.WriteHeader(http.StatusNoContent)
 		} else {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
 		}
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
 }
 
 // --- outbounds ---
 
+// listOutbounds godoc
+//
+//	@Summary      List outbounds
+//	@Description  Returns all configured outbound proxy specs (static and provider-managed).
+//	@Tags         outbounds
+//	@Produce      json
+//	@Success      200 {array} config.OutboundSpec
+//	@Failure      401 {object} errResponse
+//	@Router       /api/outbounds [get]
+//
+// getOutbound godoc
+//
+//	@Summary      Get an outbound
+//	@Description  Returns the outbound spec with the given id.
+//	@Tags         outbounds
+//	@Produce      json
+//	@Param        id path string true "Outbound id"
+//	@Success      200 {object} config.OutboundSpec
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/outbounds/{id} [get]
+//
+// createOutbound godoc
+//
+//	@Summary      Create or replace an outbound
+//	@Description  Creates (or replaces) an outbound spec. The protocol names a registered outbound plugin (e.g. "direct", "http", "socks5", "psiphon"); config is the plugin-specific configuration map.
+//	@Tags         outbounds
+//	@Accept       json
+//	@Produce      json
+//	@Param        id path string false "Outbound id (ignored unless the body omits it)"
+//	@Param        outbound body config.OutboundSpec true "Outbound to create"
+//	@Success      201 {object} config.OutboundSpec
+//	@Failure      400 {object} errResponse
+//	@Failure      401 {object} errResponse
+//	@Router       /api/outbounds [post]
+//
+// deleteOutbound godoc
+//
+//	@Summary      Delete an outbound
+//	@Description  Removes the outbound with the given id. Provider-managed outbounds are re-added by their provider on its next refresh.
+//	@Tags         outbounds
+//	@Param        id path string true "Outbound id"
+//	@Success      204 "No content"
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/outbounds/{id} [delete]
 func (s *Server) outbounds(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/outbounds")
 	switch {
@@ -195,23 +338,23 @@ func (s *Server) outbounds(w http.ResponseWriter, r *http.Request) {
 		if o, ok := s.cfg.Outbound(id); ok {
 			writeJSON(w, o, http.StatusOK)
 		} else {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
 		}
 	case r.Method == http.MethodPost || r.Method == http.MethodPut:
 		var o config.OutboundSpec
 		if err := readJSON(r, &o); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
 		if id != "" {
 			if o.ID != "" && o.ID != id {
-				http.Error(w, "id in body does not match URL", http.StatusBadRequest)
+				writeJSON(w, errResponse{"id in body does not match URL"}, http.StatusBadRequest)
 				return
 			}
 			o.ID = id
 		}
 		if o.ID == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
+			writeJSON(w, errResponse{"missing id"}, http.StatusBadRequest)
 			return
 		}
 		s.cfg.SetOutbound(&o)
@@ -220,15 +363,61 @@ func (s *Server) outbounds(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.DeleteOutbound(id) {
 			w.WriteHeader(http.StatusNoContent)
 		} else {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
 		}
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
 }
 
 // --- pools ---
 
+// listPools godoc
+//
+//	@Summary      List pools
+//	@Description  Returns all configured outbound pools (ordered outbound sets with filters + selection strategy).
+//	@Tags         pools
+//	@Produce      json
+//	@Success      200 {array} config.Pool
+//	@Failure      401 {object} errResponse
+//	@Router       /api/pools [get]
+//
+// getPool godoc
+//
+//	@Summary      Get a pool
+//	@Description  Returns the pool with the given id.
+//	@Tags         pools
+//	@Produce      json
+//	@Param        id path string true "Pool id"
+//	@Success      200 {object} config.Pool
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/pools/{id} [get]
+//
+// createPool godoc
+//
+//	@Summary      Create or replace a pool
+//	@Description  Creates (or replaces) a pool: an ordered set of outbound ids plus the filters and selection strategy applied when picking from it.
+//	@Tags         pools
+//	@Accept       json
+//	@Produce      json
+//	@Param        id path string false "Pool id (ignored unless the body omits it)"
+//	@Param        pool body config.Pool true "Pool to create"
+//	@Success      201 {object} config.Pool
+//	@Failure      400 {object} errResponse
+//	@Failure      401 {object} errResponse
+//	@Router       /api/pools [post]
+//
+// deletePool godoc
+//
+//	@Summary      Delete a pool
+//	@Description  Removes the pool with the given id.
+//	@Tags         pools
+//	@Param        id path string true "Pool id"
+//	@Success      204 "No content"
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/pools/{id} [delete]
 func (s *Server) pools(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/pools")
 	switch {
@@ -238,23 +427,23 @@ func (s *Server) pools(w http.ResponseWriter, r *http.Request) {
 		if p, ok := s.cfg.Pool(id); ok {
 			writeJSON(w, p, http.StatusOK)
 		} else {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
 		}
 	case r.Method == http.MethodPost || r.Method == http.MethodPut:
 		var p config.Pool
 		if err := readJSON(r, &p); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
 		if id != "" {
 			if p.ID != "" && p.ID != id {
-				http.Error(w, "id in body does not match URL", http.StatusBadRequest)
+				writeJSON(w, errResponse{"id in body does not match URL"}, http.StatusBadRequest)
 				return
 			}
 			p.ID = id
 		}
 		if p.ID == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
+			writeJSON(w, errResponse{"missing id"}, http.StatusBadRequest)
 			return
 		}
 		s.cfg.SetPool(&p)
@@ -263,15 +452,61 @@ func (s *Server) pools(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.DeletePool(id) {
 			w.WriteHeader(http.StatusNoContent)
 		} else {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
 		}
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
 }
 
 // --- chains ---
 
+// listChains godoc
+//
+//	@Summary      List chains
+//	@Description  Returns all configured proxy chains (ordered lists of pool layers).
+//	@Tags         chains
+//	@Produce      json
+//	@Success      200 {array} config.ChainSpec
+//	@Failure      401 {object} errResponse
+//	@Router       /api/chains [get]
+//
+// getChain godoc
+//
+//	@Summary      Get a chain
+//	@Description  Returns the chain with the given id.
+//	@Tags         chains
+//	@Produce      json
+//	@Param        id path string true "Chain id"
+//	@Success      200 {object} config.ChainSpec
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/chains/{id} [get]
+//
+// createChain godoc
+//
+//	@Summary      Create or replace a chain
+//	@Description  Creates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.
+//	@Tags         chains
+//	@Accept       json
+//	@Produce      json
+//	@Param        id path string false "Chain id (ignored unless the body omits it)"
+//	@Param        chain body config.ChainSpec true "Chain to create"
+//	@Success      201 {object} config.ChainSpec
+//	@Failure      400 {object} errResponse
+//	@Failure      401 {object} errResponse
+//	@Router       /api/chains [post]
+//
+// deleteChain godoc
+//
+//	@Summary      Delete a chain
+//	@Description  Removes the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.
+//	@Tags         chains
+//	@Param        id path string true "Chain id"
+//	@Success      204 "No content"
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/chains/{id} [delete]
 func (s *Server) chains(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/chains")
 	switch {
@@ -281,23 +516,23 @@ func (s *Server) chains(w http.ResponseWriter, r *http.Request) {
 		if c, ok := s.cfg.Chain(id); ok {
 			writeJSON(w, c, http.StatusOK)
 		} else {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
 		}
 	case r.Method == http.MethodPost || r.Method == http.MethodPut:
 		var c config.ChainSpec
 		if err := readJSON(r, &c); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
 		if id != "" {
 			if c.ID != "" && c.ID != id {
-				http.Error(w, "id in body does not match URL", http.StatusBadRequest)
+				writeJSON(w, errResponse{"id in body does not match URL"}, http.StatusBadRequest)
 				return
 			}
 			c.ID = id
 		}
 		if c.ID == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
+			writeJSON(w, errResponse{"missing id"}, http.StatusBadRequest)
 			return
 		}
 		s.cfg.SetChain(&c)
@@ -306,18 +541,29 @@ func (s *Server) chains(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.DeleteChain(id) {
 			w.WriteHeader(http.StatusNoContent)
 		} else {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
 		}
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
 }
 
 // --- metrics ---
 
+// listMetrics godoc
+//
+//	@Summary      List recent request metrics
+//	@Description  Returns up to n recent proxied-request records, newest first. n defaults to 100; values above 10000 are capped; invalid values fall back to the default.
+//	@Tags         metrics
+//	@Produce      json
+//	@Param        n query int false "Number of records to return (default 100, max 10000)" default(100) maximum(10000)
+//	@Success      200 {array} core.RequestMetric
+//	@Failure      401 {object} errResponse
+//	@Failure      500 {object} errResponse
+//	@Router       /api/metrics [get]
 func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
 		return
 	}
 	n := 100
@@ -334,7 +580,7 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	rec, err := s.ms.Recent(n)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeJSON(w, errResponse{err.Error()}, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, rec, http.StatusOK)

@@ -1,0 +1,1577 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "Admin API of the goose proxy-pool engine: create and manage inbounds (http/socks5 listeners), outbounds (proxy plugins), pools and chains, and inspect request metrics.",
+        "title": "goose admin API",
+        "contact": {},
+        "version": "1.0"
+    },
+    "paths": {
+        "/api/chains": {
+            "get": {
+                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "chains",
+                    "chains",
+                    "chains",
+                    "chains"
+                ],
+                "summary": "Delete a chain",
+                "parameters": [
+                    {
+                        "description": "Chain to create",
+                        "name": "chain",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "chains",
+                    "chains",
+                    "chains",
+                    "chains"
+                ],
+                "summary": "Delete a chain",
+                "parameters": [
+                    {
+                        "description": "Chain to create",
+                        "name": "chain",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chains/{id}": {
+            "get": {
+                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "chains",
+                    "chains",
+                    "chains",
+                    "chains"
+                ],
+                "summary": "Delete a chain",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Chain id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Chain id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Chain to create",
+                        "name": "chain",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Chain id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "chains",
+                    "chains",
+                    "chains",
+                    "chains"
+                ],
+                "summary": "Delete a chain",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Chain id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Chain id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Chain to create",
+                        "name": "chain",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Chain id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.ChainSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/engine": {
+            "get": {
+                "description": "Returns the engine-level configuration: network stack selection, admin API settings, metrics DB path and offline geo database settings.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "engine"
+                ],
+                "summary": "Get engine configuration",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Engine"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/inbounds": {
+            "get": {
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "inbounds",
+                    "inbounds",
+                    "inbounds",
+                    "inbounds"
+                ],
+                "summary": "Delete an inbound",
+                "parameters": [
+                    {
+                        "description": "Inbound to create",
+                        "name": "inbound",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "inbounds",
+                    "inbounds",
+                    "inbounds",
+                    "inbounds"
+                ],
+                "summary": "Delete an inbound",
+                "parameters": [
+                    {
+                        "description": "Inbound to create",
+                        "name": "inbound",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/inbounds/{id}": {
+            "get": {
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "inbounds",
+                    "inbounds",
+                    "inbounds",
+                    "inbounds"
+                ],
+                "summary": "Delete an inbound",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Inbound id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inbound id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Inbound to create",
+                        "name": "inbound",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inbound id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "inbounds",
+                    "inbounds",
+                    "inbounds",
+                    "inbounds"
+                ],
+                "summary": "Delete an inbound",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Inbound id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inbound id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Inbound to create",
+                        "name": "inbound",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inbound id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.Inbound"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/metrics": {
+            "get": {
+                "description": "Returns up to n recent proxied-request records, newest first. n defaults to 100; values above 10000 are capped; invalid values fall back to the default.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "metrics"
+                ],
+                "summary": "List recent request metrics",
+                "parameters": [
+                    {
+                        "maximum": 10000,
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Number of records to return (default 100, max 10000)",
+                        "name": "n",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/core.RequestMetric"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/outbounds": {
+            "get": {
+                "description": "Returns all configured outbound proxy specs (static and provider-managed).\nReturns the outbound spec with the given id.\nCreates (or replaces) an outbound spec. The protocol names a registered outbound plugin (e.g. \"direct\", \"http\", \"socks5\", \"psiphon\"); config is the plugin-specific configuration map.\nRemoves the outbound with the given id. Provider-managed outbounds are re-added by their provider on its next refresh.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "outbounds",
+                    "outbounds",
+                    "outbounds",
+                    "outbounds"
+                ],
+                "summary": "Delete an outbound",
+                "parameters": [
+                    {
+                        "description": "Outbound to create",
+                        "name": "outbound",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Returns all configured outbound proxy specs (static and provider-managed).\nReturns the outbound spec with the given id.\nCreates (or replaces) an outbound spec. The protocol names a registered outbound plugin (e.g. \"direct\", \"http\", \"socks5\", \"psiphon\"); config is the plugin-specific configuration map.\nRemoves the outbound with the given id. Provider-managed outbounds are re-added by their provider on its next refresh.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "outbounds",
+                    "outbounds",
+                    "outbounds",
+                    "outbounds"
+                ],
+                "summary": "Delete an outbound",
+                "parameters": [
+                    {
+                        "description": "Outbound to create",
+                        "name": "outbound",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/outbounds/{id}": {
+            "get": {
+                "description": "Returns all configured outbound proxy specs (static and provider-managed).\nReturns the outbound spec with the given id.\nCreates (or replaces) an outbound spec. The protocol names a registered outbound plugin (e.g. \"direct\", \"http\", \"socks5\", \"psiphon\"); config is the plugin-specific configuration map.\nRemoves the outbound with the given id. Provider-managed outbounds are re-added by their provider on its next refresh.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "outbounds",
+                    "outbounds",
+                    "outbounds",
+                    "outbounds"
+                ],
+                "summary": "Delete an outbound",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Outbound id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Outbound id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Outbound to create",
+                        "name": "outbound",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Outbound id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Returns all configured outbound proxy specs (static and provider-managed).\nReturns the outbound spec with the given id.\nCreates (or replaces) an outbound spec. The protocol names a registered outbound plugin (e.g. \"direct\", \"http\", \"socks5\", \"psiphon\"); config is the plugin-specific configuration map.\nRemoves the outbound with the given id. Provider-managed outbounds are re-added by their provider on its next refresh.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "outbounds",
+                    "outbounds",
+                    "outbounds",
+                    "outbounds"
+                ],
+                "summary": "Delete an outbound",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Outbound id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Outbound id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Outbound to create",
+                        "name": "outbound",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Outbound id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.OutboundSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/pools": {
+            "get": {
+                "description": "Returns all configured outbound pools (ordered outbound sets with filters + selection strategy).\nReturns the pool with the given id.\nCreates (or replaces) a pool: an ordered set of outbound ids plus the filters and selection strategy applied when picking from it.\nRemoves the pool with the given id.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "pools",
+                    "pools",
+                    "pools",
+                    "pools"
+                ],
+                "summary": "Delete a pool",
+                "parameters": [
+                    {
+                        "description": "Pool to create",
+                        "name": "pool",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Returns all configured outbound pools (ordered outbound sets with filters + selection strategy).\nReturns the pool with the given id.\nCreates (or replaces) a pool: an ordered set of outbound ids plus the filters and selection strategy applied when picking from it.\nRemoves the pool with the given id.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "pools",
+                    "pools",
+                    "pools",
+                    "pools"
+                ],
+                "summary": "Delete a pool",
+                "parameters": [
+                    {
+                        "description": "Pool to create",
+                        "name": "pool",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/pools/{id}": {
+            "get": {
+                "description": "Returns all configured outbound pools (ordered outbound sets with filters + selection strategy).\nReturns the pool with the given id.\nCreates (or replaces) a pool: an ordered set of outbound ids plus the filters and selection strategy applied when picking from it.\nRemoves the pool with the given id.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "pools",
+                    "pools",
+                    "pools",
+                    "pools"
+                ],
+                "summary": "Delete a pool",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Pool id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Pool id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Pool to create",
+                        "name": "pool",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Pool id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Returns all configured outbound pools (ordered outbound sets with filters + selection strategy).\nReturns the pool with the given id.\nCreates (or replaces) a pool: an ordered set of outbound ids plus the filters and selection strategy applied when picking from it.\nRemoves the pool with the given id.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "pools",
+                    "pools",
+                    "pools",
+                    "pools"
+                ],
+                "summary": "Delete a pool",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Pool id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Pool id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Pool to create",
+                        "name": "pool",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Pool id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.Pool"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "api.errResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "description": "Error is a short, human-readable reason for the rejection.",
+                    "type": "string",
+                    "example": "missing id"
+                }
+            }
+        },
+        "config.APIConfig": {
+            "type": "object",
+            "properties": {
+                "listen": {
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Token is the bearer token for admin auth; empty disables auth.",
+                    "type": "string"
+                }
+            }
+        },
+        "config.ChainSpec": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "layers": {
+                    "description": "PoolIDs, in order",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "config.Engine": {
+            "type": "object",
+            "properties": {
+                "api": {
+                    "description": "API is the admin server config.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.APIConfig"
+                        }
+                    ]
+                },
+                "db": {
+                    "description": "DB is the metrics database path.",
+                    "type": "string"
+                },
+                "geo": {
+                    "description": "Geo is the offline IP database config.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.GeoConfig"
+                        }
+                    ]
+                },
+                "stack": {
+                    "description": "Stack selects the network stack: \"system\" or \"gvisor\".",
+                    "type": "string"
+                }
+            }
+        },
+        "config.FilterSpec": {
+            "type": "object",
+            "properties": {
+                "params": {
+                    "description": "Params is filter-specific config, e.g. {\"countries\":[\"US\"]}.",
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "type": {
+                    "description": "Type is \"location\", \"latency\", \"protocol\".",
+                    "type": "string"
+                }
+            }
+        },
+        "config.GeoConfig": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "description": "Path is the database file path.",
+                    "type": "string"
+                },
+                "type": {
+                    "description": "Type is \"mmdb\", \"qqwry\", \"zxinc\" or \"\" (disabled).",
+                    "type": "string"
+                }
+            }
+        },
+        "config.Inbound": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "listen": {
+                    "description": "host:port",
+                    "type": "string"
+                },
+                "policy": {
+                    "$ref": "#/definitions/config.InboundPolicy"
+                },
+                "protocol": {
+                    "description": "\"http\" | \"socks5\"",
+                    "type": "string"
+                },
+                "users": {
+                    "description": "empty =\u003e no auth",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.User"
+                    }
+                }
+            }
+        },
+        "config.InboundPolicy": {
+            "type": "object",
+            "properties": {
+                "chain_id": {
+                    "description": "ChainID references a Chain in the chain store.",
+                    "type": "string"
+                }
+            }
+        },
+        "config.OutboundSpec": {
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "id": {
+                    "type": "string"
+                },
+                "protocol": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.Pool": {
+            "type": "object",
+            "properties": {
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.FilterSpec"
+                    }
+                },
+                "id": {
+                    "type": "string"
+                },
+                "outbound_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "selector": {
+                    "$ref": "#/definitions/config.SelectorSpec"
+                }
+            }
+        },
+        "config.SelectorSpec": {
+            "type": "object",
+            "properties": {
+                "params": {
+                    "description": "Params is strategy-specific config, e.g. sticky: {\"key\":\"domain\"}.",
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "type": {
+                    "description": "Type is \"random\", \"roundrobin\", \"sticky\", \"leastlatency\".",
+                    "type": "string"
+                }
+            }
+        },
+        "config.User": {
+            "type": "object",
+            "properties": {
+                "password": {
+                    "type": "string"
+                },
+                "policy": {
+                    "description": "Policy overrides the inbound-level policy for this user. Empty fields\nfall back to the inbound-level policy.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.InboundPolicy"
+                        }
+                    ]
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "core.Network": {
+            "type": "string",
+            "enum": [
+                "tcp",
+                "udp",
+                "tcp",
+                "udp"
+            ],
+            "x-enum-varnames": [
+                "NetworkTCP",
+                "NetworkUDP"
+            ]
+        },
+        "core.RequestMetric": {
+            "type": "object",
+            "properties": {
+                "chain": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "error": {
+                    "type": "string"
+                },
+                "finishedAt": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "inboundID": {
+                    "type": "string"
+                },
+                "latency": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "network": {
+                    "$ref": "#/definitions/core.Network"
+                },
+                "startedAt": {
+                    "type": "string"
+                },
+                "success": {
+                    "type": "boolean"
+                },
+                "target": {
+                    "type": "string"
+                },
+                "user": {
+                    "type": "string"
+                }
+            }
+        },
+        "time.Duration": {
+            "type": "integer",
+            "format": "int64",
+            "enum": [
+                1,
+                1000,
+                1000000
+            ],
+            "x-enum-varnames": [
+                "Nanosecond",
+                "Microsecond",
+                "Millisecond"
+            ]
+        }
+    },
+    "tags": [
+        {
+            "description": "Engine-level configuration (network stack, API settings, DB path)",
+            "name": "engine"
+        },
+        {
+            "description": "Inbound listeners clients connect to",
+            "name": "inbounds"
+        },
+        {
+            "description": "Outbound proxy specs the engine can dial through",
+            "name": "outbounds"
+        },
+        {
+            "description": "Named outbound sets with filters + selection strategy",
+            "name": "pools"
+        },
+        {
+            "description": "Ordered proxy chains of pool layers",
+            "name": "chains"
+        },
+        {
+            "description": "Recent proxied-request records",
+            "name": "metrics"
+        }
+    ]
+}
