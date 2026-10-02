@@ -65,6 +65,23 @@ curl --socks5-hostname 127.0.0.1:11080 https://api.ipify.org
 The admin API (`GET /api/pools`, `/api/outbounds`, ...) reports the live
 pool, including outbounds contributed by providers.
 
+## OpenAPI spec & SDK
+
+The admin API is documented by an OpenAPI (Swagger 2.0) spec generated from
+swag annotations in `internal/api/api.go`:
+
+```bash
+make openapi   # regenerates internal/api/docs/swagger.json
+```
+
+The committed spec is the source for the TypeScript SDK in
+[goose-sdk-ts](https://github.com/goose-network/goose-sdk-ts): its
+"Generate SDK from OpenAPI spec" workflow fetches this file, converts it to
+OpenAPI 3.0, and regenerates the SDK's types via openapi-typescript,
+opening a PR with the result. CI here (`.github/workflows/openapi.yml`)
+regenerates the spec on every change to `internal/api/` and fails if the
+committed spec is stale.
+
 ## Plugins
 
 The plugin contract lives in a separate, dependency-free module,

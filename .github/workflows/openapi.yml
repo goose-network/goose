@@ -1,0 +1,92 @@
+name: OpenAPI
+
+# Regenerates internal/api/docs/swagger.json from the swag annotations in
+# internal/api/api.go, verifies it matches what is committed (so the spec
+# never drifts), and notifies goose-sdk-ts when the spec changes on main so
+# its generator workflow picks it up.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "internal/api/**"
+      - ".github/workflows/openapi.yml"
+      - "Makefile"
+      - "go.mod"
+  pull_request:
+    paths:
+      - "internal/api/**"
+      - ".github/workflows/openapi.yml"
+      - "Makefile"
+      - "go.mod"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openapi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The go.mod replace directives point at sibling checkouts that do
+      # not exist on CI. Re-point them at the published GitHub repos, pinned
+      # to pseudo-versions, so the build resolves over the network.
+      - name: Re-point local replace directives at published repos
+        run: |
+          go mod edit \
+            -replace=github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20260923221657-7ba364a3ef3c \
+            -replace=github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20260924055847-0cb94efc10fd \
+            -replace=github.com/Psiphon-Labs/psiphon-tunnel-core=github.com/goose-network/psiphon-tunnel-core@v0.0.0-20260923221754-213987d32b71
+
+      - name: Resolve pinned modules
+        run: go mod tidy
+
+      - name: Install swag
+        run: go install github.com/swaggo/swag/cmd/swag@v1.16.4
+
+      - name: Regenerate OpenAPI spec
+        run: make openapi
+
+      - name: Check spec is up to date
+        run: |
+          if ! git diff --exit-code -- internal/api/docs/swagger.json; then
+            echo "::error::internal/api/docs/swagger.json is stale. Run 'make openapi' and commit the result."
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./internal/api/...
+
+  notify-sdk:
+    # Tell goose-sdk-ts to regenerate its SDK from the new spec. Only fires
+    # on main; PAT auth because repository_dispatch needs write access to
+    # the (separate) SDK repo.
+    needs: generate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch generate workflow on goose-sdk-ts
+        env:
+          SDK_DISPATCH_TOKEN: ${{ secrets.SDK_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$SDK_DISPATCH_TOKEN" ]; then
+            echo "SDK_DISPATCH_TOKEN not set; skipping SDK notification."
+            exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $SDK_DISPATCH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/goose-network/goose-sdk-ts/dispatches" \
+            -d '{"event_type":"openapi-spec-changed","client_payload":{"ref":"'"${GITHUB_SHA}"'"}}'
