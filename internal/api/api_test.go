@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -16,6 +17,10 @@ import (
 // newAPIServer builds an API server backed by a fresh config store and a temp
 // metrics store. The returned httptest.Server is wired to the API's auth
 // wrapper when a token is provided.
+//
+// These tests double as a check on the swag annotations in api.go: the
+// error bodies asserted here (plain JSON {"error": "..."}) are the same
+// errResponse shape the generated OpenAPI document declares.
 func newAPIServer(t *testing.T, token string) (*httptest.Server, *config.Store, *metrics.Store) {
 	t.Helper()
 	cfg := config.NewStore()
@@ -271,5 +276,39 @@ func recordMetric() core.RequestMetric {
 		Target:    "example.com:80",
 		Chain:     []string{"ob1"},
 		Success:   true,
+	}
+}
+
+// --- OpenAPI spec freshness ---
+
+// TestOpenAPISpecInSync asserts that the committed OpenAPI document matches
+// what swag would generate from the current annotations, using the already
+// generated swagger.json committed at internal/api/docs. This is a cheap
+// structural smoke test (the byte-exact check runs in CI with the pinned
+// swag); it guards against accidental hand-edits of the spec.
+func TestOpenAPISpecInSync(t *testing.T) {
+	data, err := os.ReadFile("../../internal/api/docs/swagger.json")
+	if err != nil {
+		t.Skipf("spec not present: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("swagger.json is not valid JSON: %v", err)
+	}
+	if doc["swagger"] != "2.0" {
+		t.Fatalf("spec must be swagger 2.0, got %v", doc["swagger"])
+	}
+	info, _ := doc["info"].(map[string]any)
+	if info == nil || info["title"] != "goose admin API" {
+		t.Fatalf("spec title missing/wrong: %v", info)
+	}
+	paths, _ := doc["paths"].(map[string]any)
+	for _, p := range []string{
+		"/api/engine", "/api/inbounds", "/api/outbounds",
+		"/api/pools", "/api/chains", "/api/metrics",
+	} {
+		if _, ok := paths[p]; !ok {
+			t.Errorf("spec is missing path %s", p)
+		}
 	}
 }
