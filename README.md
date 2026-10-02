@@ -75,12 +75,12 @@ make openapi   # regenerates internal/api/docs/swagger.json
 ```
 
 The committed spec is the source for the TypeScript SDK in
-[goose-sdk-ts](https://github.com/goose-network/goose-sdk-ts): its
-"Generate SDK from OpenAPI spec" workflow fetches this file, converts it to
-OpenAPI 3.0, and regenerates the SDK's types via openapi-typescript,
-opening a PR with the result. CI here (`.github/workflows/openapi.yml`)
-regenerates the spec on every change to `internal/api/` and fails if the
-committed spec is stale.
+[goose-sdk-ts](https://github.com/goose-network/goose-sdk-ts). CI here
+(`.github/workflows/openapi.yml`) regenerates the spec on every change to
+`internal/api/` and fails if the committed spec is stale; on every push to
+main it also checks out goose-sdk-ts with the org `GH_TOKEN` secret,
+regenerates the SDK from this commit's spec, and pushes the result to
+goose-sdk-ts's main branch — so the SDK always tracks goose main.
 
 ## Plugins
 
