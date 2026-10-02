@@ -124,15 +124,15 @@ type Recorder interface {
 
 // RequestMetric is the persisted record of one proxied request.
 type RequestMetric struct {
-	ID         string
-	InboundID  string
-	User       string
-	Network    Network
-	Target     string
-	Chain      []string
-	Success    bool
-	Error      string
-	Latency    time.Duration
-	StartedAt  time.Time
-	FinishedAt time.Time
+	ID         string    `json:"id"`
+	InboundID  string    `json:"inboundID"`
+	User       string    `json:"user"`
+	Network    Network   `json:"network"`
+	Target     string    `json:"target"`
+	Chain      []string  `json:"chain"`
+	Success    bool      `json:"success"`
+	Error      string    `json:"error"`
+	Latency    time.Duration `json:"latency"`
+	StartedAt  time.Time    `json:"startedAt"`
+	FinishedAt time.Time    `json:"finishedAt"`
 }
