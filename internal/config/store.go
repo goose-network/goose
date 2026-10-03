@@ -324,13 +324,15 @@ func (s *Store) SetProvider(p *ProviderSpec) {
 func (s *Store) DeleteProvider(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.providers[id]; !ok {
+	spec, ok := s.providers[id]
+	if !ok {
 		return false
 	}
 	delete(s.providers, id)
 	// also drop any managed outbounds + pool this provider owned
 	s.clearManagedLocked(id)
-	delete(s.pools, id)
+	// The managed pool is keyed by the spec's PoolID, not the provider id.
+	delete(s.pools, spec.PoolID)
 	s.bumpLocked()
 	return true
 }
@@ -348,6 +350,14 @@ func (s *Store) DeleteProvider(id string) bool {
 func (s *Store) SetProviderOutbounds(providerID, poolID string, specs []*OutboundSpec) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// A deleted provider's late poll result is dropped: the manager cancels
+	// its poll loop on delete, but an in-flight Outbounds call can complete
+	// after the delete already cleared the provider's outbounds and pool.
+	// Merging then would resurrect them.
+	if _, ok := s.providers[providerID]; !ok {
+		return
+	}
 
 	prev := s.managedOutbounds[providerID]
 	next := make(map[string]struct{}, len(specs))

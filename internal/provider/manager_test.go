@@ -166,6 +166,74 @@ type errSentinel struct{}
 
 func (errSentinel) Error() string { return "fake provider error" }
 
+// TestManagerReconcilesOnConfigChange verifies the admin-API flow: creating
+// a provider spec in the store after Start() launches its poll loop without
+// an engine restart; changing its config restarts it; deleting it stops it
+// and drops its managed outbounds.
+func TestManagerReconcilesOnConfigChange(t *testing.T) {
+	store := config.NewStore()
+
+	mgr := New(store)
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Close()
+
+	// Register a fake provider plugin.
+	fp := &fakeProvider{name: "fake", watch: make(chan struct{}, 1)}
+	pub.RegisterProvider("fake-reconcile-test", newFakeFactory(fp))
+
+	// Create a provider spec after the manager is already running — the
+	// pattern the admin API's POST /api/providers takes.
+	store.SetProvider(&config.ProviderSpec{
+		ID:       "late",
+		Provider: "fake-reconcile-test",
+		PoolID:   "pool-late",
+		Config:   map[string]any{"url": "http://one"},
+	})
+	fp.set([]pub.OutboundConfig{
+		{ID: "late-a", Protocol: "socks5", Config: map[string]any{"address": "127.0.0.1:11"}},
+	})
+
+	waitFor(t, func() bool {
+		pool, ok := store.Pool("pool-late")
+		return ok && len(pool.OutboundIDs) == 1
+	}, 2*time.Second, "late-created provider starts and fills its pool")
+
+	// Changing the spec config restarts the provider under the same id:
+	// the new outbound set replaces the old one.
+	fp.set([]pub.OutboundConfig{
+		{ID: "late-b", Protocol: "socks5", Config: map[string]any{"address": "127.0.0.1:12"}},
+	})
+	store.SetProvider(&config.ProviderSpec{
+		ID:       "late",
+		Provider: "fake-reconcile-test",
+		PoolID:   "pool-late",
+		Config:   map[string]any{"url": "http://two"},
+	})
+
+	waitFor(t, func() bool {
+		pool, ok := store.Pool("pool-late")
+		if !ok || len(pool.OutboundIDs) != 1 {
+			return false
+		}
+		_, hasA := store.Outbound("late-a")
+		_, hasB := store.Outbound("late-b")
+		return !hasA && hasB
+	}, 2*time.Second, "changed spec restarts provider with new outbounds")
+
+	// Deleting the spec stops the poll loop and drops the managed pool.
+	store.DeleteProvider("late")
+	waitFor(t, func() bool {
+		_, ok := store.Pool("pool-late")
+		return !ok
+	}, 2*time.Second, "deleted provider drops its pool")
+
+	if _, ok := store.Outbound("late-b"); ok {
+		t.Fatal("managed outbound late-b should be gone after provider delete")
+	}
+}
+
 // waitFor polls cond until it returns true or the timeout elapses.
 func waitFor(t *testing.T, cond func() bool, timeout time.Duration, what string) {
 	t.Helper()

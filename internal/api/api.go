@@ -34,6 +34,8 @@ import (
 //	@tag.description	Named outbound sets with filters + selection strategy
 //	@tag.name		chains
 //	@tag.description	Ordered proxy chains of pool layers
+//	@tag.name		providers
+//	@tag.description	Dynamic outbound providers (subscription links, tunnel-based sources) that populate managed pools
 //	@tag.name		metrics
 //	@tag.description	Recent proxied-request records
 
@@ -67,6 +69,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/pools/", s.pools)
 	s.mux.HandleFunc("/api/chains", s.chains)
 	s.mux.HandleFunc("/api/chains/", s.chains)
+	s.mux.HandleFunc("/api/providers", s.providers)
+	s.mux.HandleFunc("/api/providers/", s.providers)
 	s.mux.HandleFunc("/api/metrics", s.metricsHandler)
 	s.mux.HandleFunc("/api/engine", s.engine)
 }
@@ -614,3 +618,96 @@ var errBadInt = &errString{"bad integer"}
 type errString struct{ s string }
 
 func (e *errString) Error() string { return e.s }
+
+// --- providers ---
+
+// listProviders godoc
+//
+//	@Summary      List providers
+//	@Description  Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.
+//	@Tags         providers
+//	@Produce      json
+//	@Success      200 {array} config.ProviderSpec
+//	@Failure      401 {object} errResponse
+//	@Router       /api/providers [get]
+//
+// getProvider godoc
+//
+//	@Summary      Get a provider
+//	@Description  Returns the provider spec with the given id.
+//	@Tags         providers
+//	@Produce      json
+//	@Param        id path string true "Provider id"
+//	@Success      200 {object} config.ProviderSpec
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/providers/{id} [get]
+//
+// createProvider godoc
+//
+//	@Summary      Create or replace a provider
+//	@Description  Creates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. "psiphon", "subscription"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.
+//	@Tags         providers
+//	@Accept       json
+//	@Produce      json
+//	@Param        id path string false "Provider id (ignored unless the body omits it)"
+//	@Param        provider body config.ProviderSpec true "Provider to create"
+//	@Success      201 {object} config.ProviderSpec
+//	@Failure      400 {object} errResponse
+//	@Failure      401 {object} errResponse
+//	@Router       /api/providers [post]
+//
+// deleteProvider godoc
+//
+//	@Summary      Delete a provider
+//	@Description  Removes the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.
+//	@Tags         providers
+//	@Param        id path string true "Provider id"
+//	@Success      204 "No content"
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/providers/{id} [delete]
+func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
+	id := resourceID(r.URL.Path, "/api/providers")
+	switch {
+	case r.Method == http.MethodGet && id == "":
+		writeJSON(w, s.cfg.Providers(), http.StatusOK)
+	case r.Method == http.MethodGet:
+		if p, ok := s.cfg.Provider(id); ok {
+			writeJSON(w, p, http.StatusOK)
+		} else {
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
+		}
+	case r.Method == http.MethodPost || r.Method == http.MethodPut:
+		var p config.ProviderSpec
+		if err := readJSON(r, &p); err != nil {
+			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
+			return
+		}
+		if id != "" {
+			if p.ID != "" && p.ID != id {
+				writeJSON(w, errResponse{"id in body does not match URL"}, http.StatusBadRequest)
+				return
+			}
+			p.ID = id
+		}
+		if p.ID == "" {
+			writeJSON(w, errResponse{"missing id"}, http.StatusBadRequest)
+			return
+		}
+		if p.PoolID == "" {
+			writeJSON(w, errResponse{"missing pool_id"}, http.StatusBadRequest)
+			return
+		}
+		s.cfg.SetProvider(&p)
+		writeJSON(w, p, http.StatusCreated)
+	case r.Method == http.MethodDelete && id != "":
+		if s.cfg.DeleteProvider(id) {
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			writeJSON(w, errResponse{"not found"}, http.StatusNotFound)
+		}
+	default:
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
+	}
+}

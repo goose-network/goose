@@ -206,6 +206,89 @@ func TestInboundDeleteNotFound(t *testing.T) {
 	}
 }
 
+// --- providers ---
+
+// TestProviderCRUD covers the provider collection: create via item path,
+// list, get, missing-pool_id rejection, and delete (404 on the second
+// delete).
+func TestProviderCRUD(t *testing.T) {
+	hs, cfg, _ := newAPIServer(t, "")
+
+	// Missing pool_id is rejected.
+	code, body := do(t, hs, "POST", "/api/providers", "", config.ProviderSpec{
+		ID: "p1", Provider: "subscription",
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("missing pool_id should yield 400, got %d body=%s", code, body)
+	}
+
+	// Create via the item path with no body id.
+	spec := config.ProviderSpec{
+		Provider: "subscription",
+		PoolID:   "pool-sub",
+		Config:   map[string]any{"url": "https://example.com/sub"},
+	}
+	code, body = do(t, hs, "POST", "/api/providers/p1", "", spec)
+	if code != http.StatusCreated {
+		t.Fatalf("create should yield 201, got %d body=%s", code, body)
+	}
+
+	// It is listed.
+	code, body = do(t, hs, "GET", "/api/providers", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("list should yield 200, got %d", code)
+	}
+	var list []config.ProviderSpec
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatalf("unmarshal list: %v body=%s", err, body)
+	}
+	if len(list) != 1 || list[0].ID != "p1" {
+		t.Fatalf("list should carry p1, got %+v", list)
+	}
+
+	// It is fetchable by id, with the URL round-tripped.
+	code, body = do(t, hs, "GET", "/api/providers/p1", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("get should yield 200, got %d", code)
+	}
+	var got config.ProviderSpec
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, body)
+	}
+	if got.ID != "p1" || got.Provider != "subscription" || got.PoolID != "pool-sub" {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+	if u, _ := got.Config["url"].(string); u != "https://example.com/sub" {
+		t.Fatalf("config url mismatch: %v", got.Config)
+	}
+
+	// The store saw it too.
+	if _, ok := cfg.Provider("p1"); !ok {
+		t.Fatal("provider p1 missing from store")
+	}
+
+	// Delete: 204 then 404.
+	code, _ = do(t, hs, "DELETE", "/api/providers/p1", "", nil)
+	if code != http.StatusNoContent {
+		t.Fatalf("delete should yield 204, got %d", code)
+	}
+	code, _ = do(t, hs, "DELETE", "/api/providers/p1", "", nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("second delete should yield 404, got %d", code)
+	}
+}
+
+// TestProviderIDMismatchRejected asserts POST /api/providers/foo with a body
+// id of "bar" is rejected with 400.
+func TestProviderIDMismatchRejected(t *testing.T) {
+	hs, _, _ := newAPIServer(t, "")
+	spec := config.ProviderSpec{ID: "bar", Provider: "subscription", PoolID: "p"}
+	code, _ := do(t, hs, "POST", "/api/providers/foo", "", spec)
+	if code != http.StatusBadRequest {
+		t.Fatalf("id mismatch should yield 400, got %d", code)
+	}
+}
+
 // --- body size limit ---
 
 // TestBodySizeLimitRejected asserts that an oversized JSON body is rejected
@@ -305,7 +388,7 @@ func TestOpenAPISpecInSync(t *testing.T) {
 	paths, _ := doc["paths"].(map[string]any)
 	for _, p := range []string{
 		"/api/engine", "/api/inbounds", "/api/outbounds",
-		"/api/pools", "/api/chains", "/api/metrics",
+		"/api/pools", "/api/chains", "/api/providers", "/api/metrics",
 	} {
 		if _, ok := paths[p]; !ok {
 			t.Errorf("spec is missing path %s", p)

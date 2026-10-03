@@ -1277,6 +1277,346 @@
                     }
                 }
             }
+        },
+        "/api/providers": {
+            "get": {
+                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "providers",
+                    "providers",
+                    "providers",
+                    "providers"
+                ],
+                "summary": "Delete a provider",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Provider id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Provider to create",
+                        "name": "provider",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Provider id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "providers",
+                    "providers",
+                    "providers",
+                    "providers"
+                ],
+                "summary": "Delete a provider",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Provider id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Provider to create",
+                        "name": "provider",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Provider id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/providers/{id}": {
+            "get": {
+                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "providers",
+                    "providers",
+                    "providers",
+                    "providers"
+                ],
+                "summary": "Delete a provider",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Provider id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Provider to create",
+                        "name": "provider",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Provider id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "providers",
+                    "providers",
+                    "providers",
+                    "providers"
+                ],
+                "summary": "Delete a provider",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Provider id (ignored unless the body omits it)",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Provider to create",
+                        "name": "provider",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Provider id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/config.ProviderSpec"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -1446,6 +1786,26 @@
                 }
             }
         },
+        "config.ProviderSpec": {
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "id": {
+                    "type": "string"
+                },
+                "pool_id": {
+                    "description": "managed pool to populate",
+                    "type": "string"
+                },
+                "provider": {
+                    "description": "plugin name, e.g. \"psiphon\"",
+                    "type": "string"
+                }
+            }
+        },
         "config.SelectorSpec": {
             "type": "object",
             "properties": {
@@ -1568,6 +1928,10 @@
         {
             "description": "Ordered proxy chains of pool layers",
             "name": "chains"
+        },
+        {
+            "description": "Dynamic outbound providers (subscription links, tunnel-based sources) that populate managed pools",
+            "name": "providers"
         },
         {
             "description": "Recent proxied-request records",
