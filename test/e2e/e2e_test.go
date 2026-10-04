@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,7 @@ import (
 
 	_ "github.com/goose-network/goose/include" // register built-in outbound plugins
 	"github.com/goose-network/goose/internal/config"
+	"github.com/goose-network/goose/internal/core"
 	"github.com/goose-network/goose/internal/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,8 +43,8 @@ type apiClient struct {
 
 func newAPIClient(base, token string) *apiClient {
 	return &apiClient{
-		base:  base,
-		token: token,
+		base:   base,
+		token:  token,
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
 }
@@ -419,4 +421,154 @@ func mustURL(s string) *url.URL {
 		panic(err)
 	}
 	return u
+}
+
+// TestE2E_ProviderDefaultPoolAndPoolPolicy drives the full goal workflow
+// end-to-end over the admin API:
+//
+//  1. a provider (the subscription plugin pointed at a local subscription
+//     server) is created WITHOUT a pool_id, so its fetched server list lands
+//     in the default pool;
+//  2. an inbound is created with auth and a pool-only policy (pool_id +
+//     filter, no chain) that routes through that default pool;
+//  3. a client request through the inbound proxy is scheduled by the route
+//     rule and its metric is recorded.
+func TestE2E_ProviderDefaultPoolAndPoolPolicy(t *testing.T) {
+	// The "server list" the provider fetches: one socks5 line pointing at a
+	// local socks5 upstream, in the per-line URI format the subscription
+	// plugin parses.
+	socksUpstream, stopSocks := startSocks5Proxy(t)
+	defer stopSocks()
+	subBody := "socks5://" + socksUpstream + "\n"
+
+	// A subscription server that serves the list above.
+	subSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(subBody))
+	}))
+	defer subSrv.Close()
+
+	eng, api := newEngineWithAPI(t, "")
+	defer eng.Close()
+
+	// 1. create the provider with no pool_id => default pool.
+	resp, body := api.do(http.MethodPost, "/api/providers", config.ProviderSpec{
+		ID:       "subprov",
+		Provider: "subscription",
+		Config:   map[string]any{"url": subSrv.URL},
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "create provider: %s", body)
+
+	// The provider's poll lands in the "default" pool.
+	require.Eventually(t, func() bool {
+		resp, body = api.do(http.MethodGet, "/api/pools", nil)
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		var pools []config.Pool
+		if err := json.Unmarshal(body, &pools); err != nil {
+			return false
+		}
+		for _, p := range pools {
+			if p.ID == config.DefaultPoolID && len(p.OutboundIDs) == 1 {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "provider outbounds did not land in the default pool")
+
+	// 2. create an authenticated inbound whose policy routes through the
+	// default pool, narrowed by a protocol filter that allows socks5.
+	port := freePort(t)
+	resp, body = api.do(http.MethodPost, "/api/inbounds", config.Inbound{
+		ID: "app", Protocol: "socks5",
+		Listen: fmt.Sprintf("127.0.0.1:%d", port),
+		Users:  []config.User{{Username: "app", Password: "secret"}},
+		Policy: config.InboundPolicy{
+			PoolID:  config.DefaultPoolID,
+			Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []string{"socks5"}}}},
+		},
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "create inbound: %s", body)
+
+	proxyAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	require.Eventually(t, func() bool {
+		c, err := net.DialTimeout("tcp", proxyAddr, 200*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		c.Close()
+		return true
+	}, 3*time.Second, 50*time.Millisecond, "inbound listener did not come up")
+
+	// 3. request through the inbound proxy (with auth), routed by the pool
+	// policy, and confirm the metric records the served chain.
+	cli := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
+		Proxy: http.ProxyURL(mustURL("socks5://app:secret@" + proxyAddr)),
+	}}
+	respHttp, err := cli.Get("http://example.invalid/hello")
+	// The socks5 upstream rejects example.invalid, but the dial failure itself
+	// proves routing reached the pool's outbound; assert via the metric.
+	_ = err
+	if respHttp != nil {
+		respHttp.Body.Close()
+	}
+
+	require.Eventually(t, func() bool {
+		resp, body = api.do(http.MethodGet, "/api/metrics?n=10", nil)
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		var recs []core.RequestMetric
+		if err := json.Unmarshal(body, &recs); err != nil {
+			return false
+		}
+		for _, rec := range recs {
+			if rec.InboundID == "app" && rec.User == "app" && len(rec.Chain) == 1 && strings.HasPrefix(rec.Chain[0], "sub-socks5-") {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "metric for the pool-routed request was not recorded")
+}
+
+// startSocks5Proxy runs a minimal socks5 server that immediately closes the
+// target dial. It exists so the subscription list has a dialable target; the
+// metric assertion only needs the request to be routed through the pool.
+func startSocks5Proxy(t *testing.T) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveSocks5Refuse(conn)
+		}
+	}()
+	return ln.Addr().String(), func() {
+		_ = ln.Close()
+		<-done
+	}
+}
+
+// serveSocks5Refuse completes the socks5 handshake minimally and fails the
+// CONNECT, so the client sees an error but the engine records the attempt.
+func serveSocks5Refuse(conn net.Conn) {
+	defer conn.Close()
+	// greeting: read VER NMETHODS METHODS
+	hdr := make([]byte, 2)
+	if _, err := io.ReadFull(conn, hdr); err != nil {
+		return
+	}
+	methods := make([]byte, hdr[1])
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		return
+	}
+	if _, err := conn.Write([]byte{0x05, 0xFF}); err != nil { // no acceptable auth
+		return
+	}
 }

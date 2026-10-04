@@ -14,14 +14,14 @@ import (
 // fakeProvider is a minimal Provider for testing the merge loop. It returns a
 // configurable set of outbounds and emits a Watch signal when poked.
 type fakeProvider struct {
-	name    string
-	mu      sync.Mutex
-	cfgs    []pub.OutboundConfig
-	watch   chan struct{}
-	calls   int32
+	name  string
+	mu    sync.Mutex
+	cfgs  []pub.OutboundConfig
+	watch chan struct{}
+	calls int32
 }
 
-func (f *fakeProvider) Name() string { return f.name }
+func (f *fakeProvider) Name() string           { return f.name }
 func (f *fakeProvider) Watch() <-chan struct{} { return f.watch }
 func (f *fakeProvider) Outbounds(_ context.Context) ([]pub.OutboundConfig, error) {
 	atomic.AddInt32(&f.calls, 1)
@@ -45,7 +45,9 @@ func (f *fakeProvider) signal() {
 	}
 }
 
-func newFakeFactory(p pub.Provider) pub.ProviderFactory { return func(_ map[string]any) (pub.Provider, error) { return p, nil } }
+func newFakeFactory(p pub.Provider) pub.ProviderFactory {
+	return func(_ map[string]any) (pub.Provider, error) { return p, nil }
+}
 
 // TestManagerMergesProviderOutboundsIntoPool verifies the core "get proxy
 // server config from plugin into pool" behavior: a provider's Outbounds result
@@ -120,6 +122,43 @@ func TestManagerMergesProviderOutboundsIntoPool(t *testing.T) {
 	}
 }
 
+// TestManagerDefaultsToDefaultPool verifies the goal-1 default-pool rule: a
+// provider spec created without a pool_id merges its outbounds into the
+// "default" pool, so a provider can be created with just a plugin + config.
+func TestManagerDefaultsToDefaultPool(t *testing.T) {
+	fp := &fakeProvider{name: "fake", watch: make(chan struct{}, 1)}
+	pub.RegisterProvider("fake-default-pool-test", newFakeFactory(fp))
+
+	store := config.NewStore()
+	// No PoolID: should land in the "default" pool.
+	store.SetProvider(&config.ProviderSpec{
+		ID:       "pdef",
+		Provider: "fake-default-pool-test",
+		Config:   map[string]any{},
+	})
+	fp.set([]pub.OutboundConfig{
+		{ID: "def-a", Protocol: "socks5", Config: map[string]any{"address": "127.0.0.1:21"}},
+	})
+
+	mgr := New(store)
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Close()
+
+	waitFor(t, func() bool {
+		pool, ok := store.Pool(config.DefaultPoolID)
+		return ok && len(pool.OutboundIDs) == 1
+	}, 2*time.Second, "poolless provider fills the default pool")
+
+	// Deleting the provider drops the default pool it owned.
+	store.DeleteProvider("pdef")
+	waitFor(t, func() bool {
+		_, ok := store.Pool(config.DefaultPoolID)
+		return !ok
+	}, 2*time.Second, "deleted poolless provider drops its default pool")
+}
+
 // TestManagerKeepsPoolOnProviderError verifies a transient Outbounds error
 // does not drain the pool.
 func TestManagerKeepsPoolOnProviderError(t *testing.T) {
@@ -154,7 +193,7 @@ func TestManagerKeepsPoolOnProviderError(t *testing.T) {
 
 type errorProvider struct{ watch chan struct{} }
 
-func (e *errorProvider) Name() string { return "err" }
+func (e *errorProvider) Name() string           { return "err" }
 func (e *errorProvider) Watch() <-chan struct{} { return e.watch }
 func (e *errorProvider) Outbounds(_ context.Context) ([]pub.OutboundConfig, error) {
 	return nil, errFake

@@ -220,7 +220,7 @@ func validateEngine(e config.Engine) error {
 // createInbound godoc
 //
 //	@Summary      Create or replace an inbound
-//	@Description  Creates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.
+//	@Description  Creates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.
 //	@Tags         inbounds
 //	@Accept       json
 //	@Produce      json
@@ -624,7 +624,7 @@ func (e *errString) Error() string { return e.s }
 // listProviders godoc
 //
 //	@Summary      List providers
-//	@Description  Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.
+//	@Description  Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool "default".
 //	@Tags         providers
 //	@Produce      json
 //	@Success      200 {array} config.ProviderSpec
@@ -646,7 +646,7 @@ func (e *errString) Error() string { return e.s }
 // createProvider godoc
 //
 //	@Summary      Create or replace a provider
-//	@Description  Creates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. "psiphon", "subscription"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.
+//	@Description  Creates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. "psiphon", "subscription", "mihomo", "singbox"); pool_id is the managed pool its outbounds are merged into, defaulting to the "default" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.
 //	@Tags         providers
 //	@Accept       json
 //	@Produce      json
@@ -695,9 +695,11 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, errResponse{"missing id"}, http.StatusBadRequest)
 			return
 		}
+		// An omitted pool_id means the default pool, so a provider can be
+		// created with just a plugin + config (the common case: paste a
+		// subscription URL, land in "default").
 		if p.PoolID == "" {
-			writeJSON(w, errResponse{"missing pool_id"}, http.StatusBadRequest)
-			return
+			p.PoolID = config.DefaultPoolID
 		}
 		s.cfg.SetProvider(&p)
 		writeJSON(w, p, http.StatusCreated)

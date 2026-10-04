@@ -209,17 +209,24 @@ func TestInboundDeleteNotFound(t *testing.T) {
 // --- providers ---
 
 // TestProviderCRUD covers the provider collection: create via item path,
-// list, get, missing-pool_id rejection, and delete (404 on the second
-// delete).
+// list, get, default-pool rule (an omitted pool_id becomes "default"), and
+// delete (404 on the second delete).
 func TestProviderCRUD(t *testing.T) {
 	hs, cfg, _ := newAPIServer(t, "")
 
-	// Missing pool_id is rejected.
+	// An omitted pool_id defaults to the "default" pool rather than 400.
 	code, body := do(t, hs, "POST", "/api/providers", "", config.ProviderSpec{
-		ID: "p1", Provider: "subscription",
+		ID: "p0", Provider: "subscription",
 	})
-	if code != http.StatusBadRequest {
-		t.Fatalf("missing pool_id should yield 400, got %d body=%s", code, body)
+	if code != http.StatusCreated {
+		t.Fatalf("missing pool_id should default and yield 201, got %d body=%s", code, body)
+	}
+	var created config.ProviderSpec
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("unmarshal created: %v body=%s", err, body)
+	}
+	if created.PoolID != config.DefaultPoolID {
+		t.Fatalf("omitted pool_id should round-trip as %q, got %q", config.DefaultPoolID, created.PoolID)
 	}
 
 	// Create via the item path with no body id.
@@ -242,7 +249,16 @@ func TestProviderCRUD(t *testing.T) {
 	if err := json.Unmarshal(body, &list); err != nil {
 		t.Fatalf("unmarshal list: %v body=%s", err, body)
 	}
-	if len(list) != 1 || list[0].ID != "p1" {
+	if len(list) != 2 {
+		t.Fatalf("list should carry p0 + p1, got %+v", list)
+	}
+	var hasP1 bool
+	for _, p := range list {
+		if p.ID == "p1" {
+			hasP1 = true
+		}
+	}
+	if !hasP1 {
 		t.Fatalf("list should carry p1, got %+v", list)
 	}
 

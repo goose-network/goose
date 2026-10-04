@@ -37,12 +37,12 @@ type Router struct {
 	metrics *metrics.Store
 	stack   stack.Stack
 
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 	outbounds map[string]core.Outbound // built, live outbounds by id
-	pools    map[string]*builtPool
-	chains   map[string]core.Chain
+	pools     map[string]*builtPool
+	chains    map[string]core.Chain
 	// policy resolution: inboundID + user -> chainID
-	policy   policyResolver
+	policy policyResolver
 	// fallback is the long-lived selector used when an inbound has no
 	// configured chain (or the chain is missing). It is shared across all
 	// such requests so its round-robin counter advances per request instead
@@ -50,7 +50,7 @@ type Router struct {
 	fallback *fallbackSelector
 
 	copyBufPool sync.Pool
-	metricSeq  uint64
+	metricSeq   uint64
 }
 
 type policyResolver struct {
@@ -61,27 +61,33 @@ type policyResolver struct {
 type inboundPolicy struct {
 	defaultChain string
 	users        map[string]string // user -> chainID
+	// defaultRoute is the policy-level pool route (pool + per-inbound
+	// filters) synthesized into a single-layer chain when no chain_id is
+	// configured. Prebuilt at rebuild time so dispatch stays a map lookup.
+	defaultRoute core.Chain
+	// userRoutes is per-user pool routes, same shape as defaultRoute.
+	userRoutes map[string]core.Chain
 }
 
 // builtPool is a pool with its filters + selector materialized.
 type builtPool struct {
-	id       string
+	id        string
 	outbounds []core.Outbound
-	filters  []core.Filter
-	selector core.Selector
+	filters   []core.Filter
+	selector  core.Selector
 }
 
 // New creates a router. The stack is used as the underlying dialer for
 // outbounds that need to reach their own server.
 func New(cfg *config.Store, ms *metrics.Store, stk stack.Stack) *Router {
 	r := &Router{
-		cfg:       cfg,
-		metrics:   ms,
-		stack:     stk,
-		outbounds: map[string]core.Outbound{},
-		pools:     map[string]*builtPool{},
-		chains:    map[string]core.Chain{},
-		fallback:  &fallbackSelector{},
+		cfg:         cfg,
+		metrics:     ms,
+		stack:       stk,
+		outbounds:   map[string]core.Outbound{},
+		pools:       map[string]*builtPool{},
+		chains:      map[string]core.Chain{},
+		fallback:    &fallbackSelector{},
 		copyBufPool: sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }},
 	}
 	r.rebuild()
@@ -165,18 +171,61 @@ func (r *Router) rebuild() {
 	// build policy resolver
 	r.policy = policyResolver{inbounds: map[string]*inboundPolicy{}}
 	for _, in := range r.cfg.Inbounds() {
-		ip := &inboundPolicy{defaultChain: in.Policy.ChainID, users: map[string]string{}}
+		ip := &inboundPolicy{
+			defaultChain: in.Policy.ChainID,
+			users:        map[string]string{},
+			userRoutes:   map[string]core.Chain{},
+		}
+		ip.defaultRoute = r.buildRoute(in.Policy)
 		for _, u := range in.Users {
-			if u.Policy != nil && u.Policy.ChainID != "" {
+			if u.Policy == nil {
+				continue
+			}
+			if u.Policy.ChainID != "" {
 				ip.users[u.Username] = u.Policy.ChainID
+			} else if ch := r.buildRoute(*u.Policy); len(ch) > 0 {
+				// A user policy with only pool+filters (no chain) gets its own
+				// single-layer route; otherwise it falls back to the inbound's
+				// default route.
+				ip.userRoutes[u.Username] = ch
 			}
 		}
 		r.policy.inbounds[in.ID] = ip
 	}
 }
 
-// resolveChain returns the chain for an inbound+user, or a single-direct
-// fallback chain if none configured.
+// buildRoute synthesizes the single-layer chain for a policy that names a
+// pool instead of a chain: the pool's outbounds as candidates, the pool's
+// own filters plus the policy's filters, and the pool's selector (or the
+// fallback). Returns nil when the policy names no pool.
+func (r *Router) buildRoute(p config.InboundPolicy) core.Chain {
+	if p.PoolID == "" {
+		return nil
+	}
+	bp, ok := r.pools[p.PoolID]
+	if !ok {
+		return nil
+	}
+	filters := make([]core.Filter, 0, len(bp.filters)+len(p.Filters))
+	filters = append(filters, bp.filters...)
+	for _, fs := range p.Filters {
+		if f, err := filter.New(fs.Type, fs.Params); err == nil {
+			filters = append(filters, f)
+		}
+	}
+	sel := core.Selector(bp.selector)
+	if sel == nil {
+		sel = &fallbackSelector{}
+	}
+	return core.Chain{{
+		Filters:  filters,
+		Selector: &poolSelector{Selector: sel, pool: bp.outbounds},
+	}}
+}
+
+// resolveChain returns the chain for an inbound+user: a named chain when the
+// policy references one, otherwise the policy's single-layer pool route, and
+// finally the shared all-outbounds fallback if neither is configured.
 func (r *Router) resolveChain(inboundID, user string) core.Chain {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -187,6 +236,12 @@ func (r *Router) resolveChain(inboundID, user string) core.Chain {
 		}
 		if ch, ok := r.chains[chainID]; ok && len(ch) > 0 {
 			return ch
+		}
+		if ch, ok := ip.userRoutes[user]; ok && len(ch) > 0 {
+			return ch
+		}
+		if len(ip.defaultRoute) > 0 {
+			return ip.defaultRoute
 		}
 	}
 	// fallback: a single layer that picks any available outbound.

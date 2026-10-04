@@ -6,6 +6,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -33,12 +34,12 @@ type listenerEntry struct {
 
 // Engine is the running goose engine.
 type Engine struct {
-	cfg     *config.Store
-	ms      *metrics.Store
-	geo     *geo.Manager
-	stack   stack.Stack
-	router  *router.Router
-	api     *api.Server
+	cfg       *config.Store
+	ms        *metrics.Store
+	geo       *geo.Manager
+	stack     stack.Stack
+	router    *router.Router
+	api       *api.Server
 	providers *provider.Manager
 
 	mu        sync.Mutex
@@ -48,8 +49,8 @@ type Engine struct {
 	// done is closed in Close to stop the watch goroutine and make reconcile
 	// a no-op, so config changes arriving during shutdown cannot spawn new
 	// listeners after Close has torn the existing ones down.
-	done  chan struct{}
-	once  sync.Once
+	done   chan struct{}
+	once   sync.Once
 	closed bool
 }
 
@@ -201,7 +202,7 @@ func inboundSignature(in *config.Inbound) string {
 	for _, u := range in.Users {
 		fmt.Fprintf(&b, "%s=%s:%s|", u.Username, u.Password, userChain(u.Policy))
 	}
-	fmt.Fprintf(&b, "chain=%s", in.Policy.ChainID)
+	fmt.Fprintf(&b, "chain=%s;pool=%s;filters=%s", in.Policy.ChainID, in.Policy.PoolID, policyFilters(in.Policy.Filters))
 	return b.String()
 }
 
@@ -209,7 +210,18 @@ func userChain(p *config.InboundPolicy) string {
 	if p == nil {
 		return ""
 	}
-	return p.ChainID
+	return fmt.Sprintf("%s/%s/%s", p.ChainID, p.PoolID, policyFilters(p.Filters))
+}
+
+// policyFilters renders filter specs into the signature so adding/removing
+// a policy filter restarts the listener with the new route.
+func policyFilters(fs []config.FilterSpec) string {
+	parts := make([]string, 0, len(fs))
+	for _, f := range fs {
+		params, _ := json.Marshal(f.Params)
+		parts = append(parts, f.Type+"="+string(params))
+	}
+	return strings.Join(parts, ",")
 }
 
 func toInboundUsers(users []config.User) []inbound.User {

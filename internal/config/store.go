@@ -54,11 +54,24 @@ type User struct {
 	Policy *InboundPolicy `json:"policy,omitempty"`
 }
 
-// InboundPolicy binds a chain (and thus its filters + LB strategy) to an
-// inbound or user.
+// InboundPolicy binds a route to an inbound or user. A route is one of:
+//
+//   - ChainID: a named chain (ordered pool layers) from the chain store;
+//   - PoolID + Filters: a single pool layer, with optional filters that
+//     further narrow the pool for this inbound only (no chain needed);
+//   - neither: the engine falls back to picking any available outbound.
+//
+// When both ChainID and PoolID are set, ChainID wins.
 type InboundPolicy struct {
 	// ChainID references a Chain in the chain store.
 	ChainID string `json:"chain_id"`
+	// PoolID references a Pool to route through directly, without needing a
+	// named chain. Ignored when ChainID is set.
+	PoolID string `json:"pool_id"`
+	// Filters narrow the pool's candidates for this inbound only (same
+	// FilterSpec shape as a pool's filters). Applied on top of the pool's own
+	// filters when PoolID routing is used; ignored for ChainID routing.
+	Filters []FilterSpec `json:"filters"`
 }
 
 // OutboundSpec is the config form of an outbound, before it is built into a
@@ -72,10 +85,10 @@ type OutboundSpec struct {
 // Pool is a named, ordered set of outbound IDs plus the filters and
 // selection strategy applied when picking from it.
 type Pool struct {
-	ID         string        `json:"id"`
+	ID          string       `json:"id"`
 	OutboundIDs []string     `json:"outbound_ids"`
-	Filters    []FilterSpec  `json:"filters"`
-	Selector   SelectorSpec  `json:"selector"`
+	Filters     []FilterSpec `json:"filters"`
+	Selector    SelectorSpec `json:"selector"`
 }
 
 // FilterSpec configures one filter dimension.
@@ -101,6 +114,11 @@ type ChainSpec struct {
 	Layers []string `json:"layers"` // PoolIDs, in order
 }
 
+// DefaultPoolID is the managed pool providers populate when their spec does
+// not name one, so a provider can be created with just a URL and still land
+// somewhere routable.
+const DefaultPoolID = "default"
+
 // ProviderSpec configures a dynamic outbound provider: a plugin that sources
 // its own proxy server configs and feeds them into a managed pool. The engine
 // instantiates the provider from (Provider, Config), polls Outbounds, and
@@ -108,20 +126,30 @@ type ChainSpec struct {
 // PoolID. This is how a plugin like Psiphon (which fetches and refreshes a
 // remote server list) gets its servers into the engine's pool.
 type ProviderSpec struct {
-	ID       string         `json:"id"`
-	Provider string         `json:"provider"` // plugin name, e.g. "psiphon"
-	PoolID   string         `json:"pool_id"`  // managed pool to populate
-	Config   map[string]any `json:"config"`
+	ID       string `json:"id"`
+	Provider string `json:"provider"` // plugin name, e.g. "psiphon"
+	// PoolID is the managed pool to populate; empty means the default pool.
+	PoolID string         `json:"pool_id"`
+	Config map[string]any `json:"config"`
+}
+
+// EffectivePoolID returns the pool this spec's outbounds merge into, applying
+// the default-pool rule for specs created without one.
+func (p *ProviderSpec) EffectivePoolID() string {
+	if p.PoolID == "" {
+		return DefaultPoolID
+	}
+	return p.PoolID
 }
 
 // Store is the concurrency-safe live configuration store.
 type Store struct {
-	mu       sync.RWMutex
-	engine   Engine
-	inbounds map[string]*Inbound
+	mu        sync.RWMutex
+	engine    Engine
+	inbounds  map[string]*Inbound
 	outbounds map[string]*OutboundSpec
-	pools    map[string]*Pool
-	chains   map[string]*ChainSpec
+	pools     map[string]*Pool
+	chains    map[string]*ChainSpec
 	providers map[string]*ProviderSpec
 	// managedOutbounds records outbound IDs owned by a provider, so
 	// SetProviderOutbounds can replace a provider's full set atomically
@@ -130,8 +158,8 @@ type Store struct {
 	managedOutbounds map[string]map[string]struct{}
 	// version is bumped on every mutation; subscribers use it to detect
 	// changes and reconcile.
-	version  uint64
-	subs     []chan uint64
+	version uint64
+	subs    []chan uint64
 }
 
 // NewStore returns an empty store with sensible defaults.
@@ -331,8 +359,9 @@ func (s *Store) DeleteProvider(id string) bool {
 	delete(s.providers, id)
 	// also drop any managed outbounds + pool this provider owned
 	s.clearManagedLocked(id)
-	// The managed pool is keyed by the spec's PoolID, not the provider id.
-	delete(s.pools, spec.PoolID)
+	// The managed pool is keyed by the spec's effective PoolID, not the
+	// provider id.
+	delete(s.pools, spec.EffectivePoolID())
 	s.bumpLocked()
 	return true
 }
@@ -358,6 +387,11 @@ func (s *Store) SetProviderOutbounds(providerID, poolID string, specs []*Outboun
 	if _, ok := s.providers[providerID]; !ok {
 		return
 	}
+	// Same default-pool rule as the spec: a poll landing in the default pool
+	// must not create a literal "" pool entry.
+	if poolID == "" {
+		poolID = DefaultPoolID
+	}
 
 	prev := s.managedOutbounds[providerID]
 	next := make(map[string]struct{}, len(specs))
@@ -381,15 +415,23 @@ func (s *Store) SetProviderOutbounds(providerID, poolID string, specs []*Outboun
 	for _, spec := range specs {
 		ids = append(ids, spec.ID)
 	}
-	pool, ok := s.pools[poolID]
-	if !ok {
-		pool = &Pool{ID: poolID}
-		s.pools[poolID] = pool
+	// Replace the pool pointer rather than mutating it in place: the store
+	// hands *Pool pointers to readers (Pool()/Pools()), which hold them
+	// beyond the lock — mutating pool.OutboundIDs in place races with those
+	// readers. Publishing a fresh Pool keeps every previously-returned
+	// pointer an immutable snapshot.
+	pool := &Pool{
+		ID:          poolID,
+		OutboundIDs: ids,
 	}
-	pool.OutboundIDs = ids
-	// leave any user-configured filters/selector on the pool intact; if the
-	// pool is brand-new and has no selector, the router falls back to a
-	// round-robin-style fallback selector.
+	if existing, ok := s.pools[poolID]; ok {
+		// keep user-configured filters/selector; if the pool is brand-new and
+		// has no selector, the router falls back to a round-robin-style
+		// fallback selector.
+		pool.Filters = existing.Filters
+		pool.Selector = existing.Selector
+	}
+	s.pools[poolID] = pool
 
 	s.bumpLocked()
 }

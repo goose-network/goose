@@ -217,7 +217,7 @@ func (m *Manager) poll(ctx context.Context, spec *config.ProviderSpec, prov pub.
 			Config:   c.Config,
 		})
 	}
-	m.cfg.SetProviderOutbounds(spec.ID, spec.PoolID, specs)
+	m.cfg.SetProviderOutbounds(spec.ID, spec.EffectivePoolID(), specs)
 }
 
 // Close stops all provider goroutines. It is idempotent.

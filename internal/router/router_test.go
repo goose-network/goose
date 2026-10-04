@@ -294,3 +294,95 @@ func TestResolveChainFallbackRoundRobins(t *testing.T) {
 	}
 	assert.Len(t, seen, 2, "fallback selector should round-robin across both outbounds, not always pick the first")
 }
+
+// TestResolveChainPoolPolicy verifies goal 2's direct pool routing: an
+// inbound whose policy names a pool_id (no chain) routes through that pool's
+// outbounds only, ignoring outbounds outside the pool.
+func TestResolveChainPoolPolicy(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "in-pool", Protocol: "testdirect", Config: map[string]any{"id": "in-pool"}},
+			{ID: "out-pool", Protocol: "testdirect", Config: map[string]any{"id": "out-pool"}},
+		},
+		[]*config.Pool{{ID: "mypool", OutboundIDs: []string{"in-pool"}}},
+		nil,
+		[]*config.Inbound{{
+			ID:       "in",
+			Protocol: "http",
+			Listen:   "127.0.0.1:0",
+			Policy:   config.InboundPolicy{PoolID: "mypool"},
+		}},
+	)
+	for i := 0; i < 4; i++ {
+		conn, chain, err := r.Dial(context.Background(), metaFor("in", "example.com", "80"))
+		require.NoError(t, err)
+		conn.Close()
+		require.Len(t, chain, 1)
+		assert.Equal(t, "in-pool", chain[0], "pool policy should route only through the pool's outbounds")
+	}
+}
+
+// TestResolveChainPoolPolicyFilters verifies the per-inbound filters narrow
+// the pool: a protocol filter that excludes the pool's only member makes the
+// dial fail, proving the filter is applied on top of the pool route.
+func TestResolveChainPoolPolicyFilters(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "only", Protocol: "testdirect", Config: map[string]any{"id": "only"}},
+		},
+		[]*config.Pool{{ID: "mypool", OutboundIDs: []string{"only"}}},
+		nil,
+		[]*config.Inbound{{
+			ID:       "in",
+			Protocol: "http",
+			Listen:   "127.0.0.1:0",
+			Policy: config.InboundPolicy{
+				PoolID:  "mypool",
+				Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []any{"socks5"}}}},
+			},
+		}},
+	)
+	_, _, err := r.Dial(context.Background(), metaFor("in", "example.com", "80"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no outbound passed filters")
+}
+
+// TestResolveChainUserPoolPolicy verifies a per-user policy with only a pool
+// route (no chain_id) overrides the inbound's default route for that user,
+// while other users keep the default.
+func TestResolveChainUserPoolPolicy(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "shared", Protocol: "testdirect", Config: map[string]any{"id": "shared"}},
+			{ID: "vip", Protocol: "testdirect", Config: map[string]any{"id": "vip"}},
+		},
+		[]*config.Pool{
+			{ID: "pool-default", OutboundIDs: []string{"shared"}},
+			{ID: "pool-vip", OutboundIDs: []string{"vip"}},
+		},
+		nil,
+		[]*config.Inbound{{
+			ID:       "in",
+			Protocol: "http",
+			Listen:   "127.0.0.1:0",
+			Policy:   config.InboundPolicy{PoolID: "pool-default"},
+			Users: []config.User{{
+				Username: "alice",
+				Password: "pw",
+				Policy:   &config.InboundPolicy{PoolID: "pool-vip"},
+			}},
+		}},
+	)
+	meta := metaFor("in", "example.com", "80")
+	conn, chain, err := r.Dial(context.Background(), meta)
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "shared", chain[0])
+
+	meta = metaFor("in", "example.com", "80")
+	meta.User = "alice"
+	conn, chain, err = r.Dial(context.Background(), meta)
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "vip", chain[0])
+}

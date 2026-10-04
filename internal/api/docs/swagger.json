@@ -335,7 +335,7 @@
         },
         "/api/inbounds": {
             "get": {
-                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -399,7 +399,7 @@
                 }
             },
             "post": {
-                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -465,7 +465,7 @@
         },
         "/api/inbounds/{id}": {
             "get": {
-                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -549,7 +549,7 @@
                 }
             },
             "delete": {
-                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1280,7 +1280,7 @@
         },
         "/api/providers": {
             "get": {
-                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_id is the managed pool its outbounds are merged into, defaulting to the \"default\" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1364,7 +1364,7 @@
                 }
             },
             "post": {
-                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_id is the managed pool its outbounds are merged into, defaulting to the \"default\" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1450,7 +1450,7 @@
         },
         "/api/providers/{id}": {
             "get": {
-                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_id is the managed pool its outbounds are merged into, defaulting to the \"default\" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1534,7 +1534,7 @@
                 }
             },
             "delete": {
-                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into.\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\"); pool_id is the managed pool its outbounds are merged into; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_id is the managed pool its outbounds are merged into, defaulting to the \"default\" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1745,6 +1745,17 @@
                 "chain_id": {
                     "description": "ChainID references a Chain in the chain store.",
                     "type": "string"
+                },
+                "filters": {
+                    "description": "Filters narrow the pool's candidates for this inbound only (same\nFilterSpec shape as a pool's filters). Applied on top of the pool's own\nfilters when PoolID routing is used; ignored for ChainID routing.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.FilterSpec"
+                    }
+                },
+                "pool_id": {
+                    "description": "PoolID references a Pool to route through directly, without needing a\nnamed chain. Ignored when ChainID is set.",
+                    "type": "string"
                 }
             }
         },
@@ -1797,7 +1808,7 @@
                     "type": "string"
                 },
                 "pool_id": {
-                    "description": "managed pool to populate",
+                    "description": "PoolID is the managed pool to populate; empty means the default pool.",
                     "type": "string"
                 },
                 "provider": {
