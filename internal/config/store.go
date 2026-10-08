@@ -410,10 +410,33 @@ func (s *Store) SetProviderOutbounds(providerID, poolID string, specs []*Outboun
 	}
 	s.managedOutbounds[providerID] = next
 
-	// (re)build the managed pool to reference exactly these outbounds.
+	// (re)build the managed pool: this provider's outbounds plus every OTHER
+	// provider's outbounds that still target the same pool, so two providers
+	// sharing a pool (e.g. two subscriptions both landing in "default")
+	// accumulate instead of clobbering each other on each poll.
 	ids := make([]string, 0, len(specs))
 	for _, spec := range specs {
 		ids = append(ids, spec.ID)
+	}
+	for otherID, owned := range s.managedOutbounds {
+		if otherID == providerID {
+			continue
+		}
+		// Only providers still aimed at this pool contribute; a provider
+		// that moved to another pool leaves its old IDs behind.
+		otherSpec, ok := s.providers[otherID]
+		if !ok || otherSpec.EffectivePoolID() != poolID {
+			continue
+		}
+		for id := range owned {
+			if _, keep := next[id]; keep {
+				continue
+			}
+			if _, ok := s.outbounds[id]; !ok {
+				continue
+			}
+			ids = append(ids, id)
+		}
 	}
 	// Replace the pool pointer rather than mutating it in place: the store
 	// hands *Pool pointers to readers (Pool()/Pools()), which hold them
