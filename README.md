@@ -93,6 +93,36 @@ Config keys (broker mode, `config_path` YAML base, `socks_listen`,
 `outbound_id`, ...) are documented in
 [geph5-go's plugin README](../geph5-go/plugins/geph/README.md).
 
+### Tor provider
+
+The bundled [tor-go](../tor-go) client is wired in as a provider too. It
+embeds a from-scratch Go Tor client (link v3 handshake, ntor circuits,
+directory fetch with signature verification) and, once the client is serving,
+contributes its loopback SOCKS5 listener as one `socks5` outbound — so the
+pool's traffic rides real 3-hop Tor circuits:
+
+```json
+{
+  "providers": [
+    {
+      "id": "tor-prov",
+      "provider": "tor",
+      "pool_id": "tor-pool",
+      "config": {
+        "upstream_proxy": "127.0.0.1:7890"
+      }
+    }
+  ]
+}
+```
+
+First bootstrap fetches a signed consensus + microdescriptors (expect ~a
+minute before the pool fills in). Config keys (`path_len`,
+`verify_signatures` — default on, `use_fallbacks`, timeouts, ...) are
+documented in [tor-go's plugin README](../tor-go/plugins/tor/README.md). To
+verify the full path: `curl -s -x socks5h://127.0.0.1:11080
+https://check.torproject.org/api/ip` should answer `{"IsTor":true,...}`.
+
 ## OpenAPI spec & SDK
 
 The admin API is documented by an OpenAPI (Swagger 2.0) spec generated from
@@ -129,21 +159,26 @@ acyclic.
   The engine polls `Outbounds` and merges the result into a managed pool.
 
 Built-in protocols (`direct`, `http`, `socks5`) live under `plugins/`. The
-bundled [Psiphon provider](../psiphon) and the
-[geph provider](../geph5-go/plugins/geph) (part of the geph5-go client port)
+bundled [Psiphon provider](../psiphon), the
+[geph provider](../geph5-go/plugins/geph) (part of the geph5-go client port),
+and the [tor provider](../tor-go/plugins/tor) (part of the tor-go client)
 are wired in by default.
 
 ### Adding a provider plugin
 
 1. Create a module importing only `goose-plugin-api`; implement `Provider`;
    register in `init()` with `plugin.RegisterProvider`.
-2. In goose's `go.mod`, add `require` + `replace` pointing at the plugin.
+2. In goose's `go.mod`, add a `require` pointing at the plugin — a local
+   `replace` only while it is unpublished (tor-go is required straight from
+   the module proxy; the geph and Psiphon plugins still use a replace).
 3. Add `_ "your/plugin/module"` to `include/register.go`.
 
 A plugin may be its own repo (Psiphon) or live inside the project it embeds —
-the geph provider sits in geph5-go's `plugins/geph` because it embeds that
-module's `internal/` client packages, and goose pulls it in with the same
-require + replace + blank-import wiring.
+the geph provider sits in geph5-go's `plugins/geph` and the tor provider in
+tor-go's `plugins/tor`, because each embeds that module's `internal/` client
+packages. The tor provider also demonstrates the published variant: tor-go is
+tagged as `github.com/goose-network/tor-go`, so goose requires the versioned
+module directly (no `replace`) — plain `require` + blank-import wiring.
 
 ## Tests
 
@@ -160,3 +195,8 @@ GEPH_EXIT_BIN=../geph5/bin-out/geph5-exit \
 GEPH_TEST_TARGET=223.5.5.5:80 \
 GOTOOLCHAIN=go1.26.8 go test -run TestE2E_Geph -v ./test/e2e/
 ```
+
+The tor provider's real-network check (a full engine with an inbound routed
+through the tor pool, asserting `IsTor:true` from check.torproject.org) is
+run manually — the recipe is in
+[tor-go's plugin README](../tor-go/plugins/tor/README.md).

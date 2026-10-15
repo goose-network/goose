@@ -208,3 +208,14 @@ is live, since CONNECTs fail before that; readiness is reported via the
 demonstrates the variant of plugin placement where the plugin lives inside
 the embedded project's repo (to use its `internal/` packages) and goose pulls
 it in via `require` + `replace`.
+
+The [tor provider](../tor-go/plugins/tor) is a third example — a slow-boot
+one. It embeds tor-go (a from-scratch Go Tor client) and contributes the
+client's loopback SOCKS5 listener as a single socks5 outbound once the client
+is serving; until then `Outbounds` stays empty and bootstrap failures are
+retried with backoff inside the provider, so a dead network leaves the pool
+empty rather than killing the provider. It demonstrates the *published*
+placement variant: tor-go is tagged as its own versioned module
+(`github.com/goose-network/tor-go`), so goose requires it directly from the
+module proxy with no local `replace` — the wiring every sibling plugin
+converges on once it is tagged.
