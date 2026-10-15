@@ -127,6 +127,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.12.0 // indirect
 	github.com/openacid/low v0.1.21 // indirect
 	github.com/openai/openai-go/v3 v3.26.0 // indirect
+	github.com/openrung/openrung/brokerapi v0.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.27 // indirect
 	github.com/pkg/sftp v1.13.10 // indirect
 	github.com/rasky/go-lzo v0.0.0-20200203143853-96a758eda86e // indirect
@@ -268,6 +269,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/goose-network/goose-plugin-mihomo v0.0.0
 	github.com/goose-network/goose-plugin-singbox v0.0.0
+	github.com/goose-network/openrung-go v0.0.0
 	github.com/grafov/m3u8 v0.0.0-20171211212457-6ab8f28ed427 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/kamstrup/intmap v0.5.2 // indirect
@@ -346,3 +348,7 @@ replace github.com/sagernet/sing-box => ../sing-box
 replace github.com/quic-go/qpack => github.com/quic-go/qpack v0.4.0
 
 replace github.com/geph-official/geph5-go => ../geph5-go
+
+replace github.com/goose-network/openrung-go => ../openrung-go
+
+replace github.com/openrung/openrung/brokerapi => ../openrung/brokerapi
