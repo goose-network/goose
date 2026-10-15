@@ -65,6 +65,34 @@ curl --socks5-hostname 127.0.0.1:11080 https://api.ipify.org
 The admin API (`GET /api/pools`, `/api/outbounds`, ...) reports the live
 pool, including outbounds contributed by providers.
 
+### Geph provider
+
+The bundled [geph5-go](../geph5-go) client is wired in as a provider too. It
+embeds the full geph5 client (a wire-compatible Go port: broker protocol,
+X25519+ed25519 exit handshake, sosistab3/picomux tunnels) and, once its first
+tunnel to a geph5 exit is live, contributes the client's loopback SOCKS5
+listener as one `socks5` outbound:
+
+```json
+{
+  "providers": [
+    {
+      "id": "geph-prov",
+      "provider": "geph",
+      "pool_id": "geph-pool",
+      "config": {
+        "exit_constraint": { "direct": "203.0.113.7:9000/<exit-pubkey-hex>" },
+        "secret": "user-secret"
+      }
+    }
+  ]
+}
+```
+
+Config keys (broker mode, `config_path` YAML base, `socks_listen`,
+`outbound_id`, ...) are documented in
+[geph5-go's plugin README](../geph5-go/plugins/geph/README.md).
+
 ## OpenAPI spec & SDK
 
 The admin API is documented by an OpenAPI (Swagger 2.0) spec generated from
@@ -101,7 +129,9 @@ acyclic.
   The engine polls `Outbounds` and merges the result into a managed pool.
 
 Built-in protocols (`direct`, `http`, `socks5`) live under `plugins/`. The
-bundled [Psiphon provider](../psiphon) is wired in by default.
+bundled [Psiphon provider](../psiphon) and the
+[geph provider](../geph5-go/plugins/geph) (part of the geph5-go client port)
+are wired in by default.
 
 ### Adding a provider plugin
 
@@ -110,8 +140,23 @@ bundled [Psiphon provider](../psiphon) is wired in by default.
 2. In goose's `go.mod`, add `require` + `replace` pointing at the plugin.
 3. Add `_ "your/plugin/module"` to `include/register.go`.
 
+A plugin may be its own repo (Psiphon) or live inside the project it embeds —
+the geph provider sits in geph5-go's `plugins/geph` because it embeds that
+module's `internal/` client packages, and goose pulls it in with the same
+require + replace + blank-import wiring.
+
 ## Tests
 
 ```bash
 GOTOOLCHAIN=go1.26.8 go test ./...
+```
+
+The geph provider has a real-network e2e (boots a Rust `geph5-exit` and pushes
+HTTP through inbound → pool → geph tunnel); it is skipped unless
+`GEPH_EXIT_BIN` is set:
+
+```bash
+GEPH_EXIT_BIN=../geph5/bin-out/geph5-exit \
+GEPH_TEST_TARGET=223.5.5.5:80 \
+GOTOOLCHAIN=go1.26.8 go test -run TestE2E_Geph -v ./test/e2e/
 ```

@@ -198,3 +198,13 @@ a tunnel-core tunnel with the background remote-server-list fetcher enabled
 (so the server list auto-updates like the Psiphon Windows client) and
 exposes the tunnel's local SOCKS proxy as a single socks5 outbound in the
 managed pool.
+
+The [geph provider](../geph5-go/plugins/geph) is a second bundled example of
+the same shape: it embeds the geph5-go client (a wire-compatible Go port of
+the geph5 client core) and contributes the client's loopback SOCKS5 listener
+as a single socks5 outbound — but only after the first tunnel to a geph5 exit
+is live, since CONNECTs fail before that; readiness is reported via the
+`Watch()` signal so the pool fills as soon as the tunnel comes up. It also
+demonstrates the variant of plugin placement where the plugin lives inside
+the embedded project's repo (to use its `internal/` packages) and goose pulls
+it in via `require` + `replace`.
