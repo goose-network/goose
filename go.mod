@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/goose-network/goose-plugin-api v0.0.0
 	github.com/goose-network/goose-plugin-psiphon v0.0.0
-	github.com/proxy/tor-go v0.0.0
+	github.com/goose-network/tor-go v0.0.2
 	github.com/stretchr/testify v1.12.1
 	go.etcd.io/bbolt v1.4.0
 	gvisor.dev/gvisor v0.0.0-20260218152508-eed1cebf761e
@@ -342,5 +342,3 @@ replace github.com/metacubex/mihomo => ../mihomo
 replace github.com/sagernet/sing-box => ../sing-box
 
 replace github.com/quic-go/qpack => github.com/quic-go/qpack v0.4.0
-
-replace github.com/proxy/tor-go => ../tor-go

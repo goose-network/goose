@@ -12,5 +12,5 @@ import (
 	_ "github.com/goose-network/goose/plugins/http"
 	_ "github.com/goose-network/goose/plugins/socks5"
 	_ "github.com/goose-network/goose/plugins/subscription"
-	_ "github.com/proxy/tor-go/plugins/tor"
+	_ "github.com/goose-network/tor-go/plugins/tor"
 )
