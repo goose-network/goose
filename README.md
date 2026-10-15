@@ -93,6 +93,35 @@ Config keys (broker mode, `config_path` YAML base, `socks_listen`,
 `outbound_id`, ...) are documented in
 [geph5-go's plugin README](../geph5-go/plugins/geph/README.md).
 
+The provider can also run **fully standalone — one process, no Rust
+`geph5-exit`, no broker**: `"embedded_exit"` boots geph5-go's Go exit server
+(`internal/exitlib`) inside the engine's own process and pins the embedded
+client at it:
+
+```json
+{
+  "providers": [
+    {
+      "id": "geph-prov",
+      "provider": "geph",
+      "pool_id": "geph-pool",
+      "config": {
+        "embedded_exit": { "allow_loopback": true },
+        "secret": "any-value"
+      }
+    }
+  ]
+}
+```
+
+`allow_loopback` relaxes the exit's global-routability rules so it will proxy
+to loopback targets in the same process — useful for single-box setups;
+`listen` and `seed_hex` (a stable signing key) are the other knobs. Traffic
+then rides the real geph5 tunnels end to end (X25519+ed25519 handshake,
+picomux, ChaCha20-Poly1305), just with the exit in-process. This shape is
+continuously verified in the default test suite
+(`TestE2E_GephProviderStandalone`).
+
 ### Tor provider
 
 The bundled [tor-go](../tor-go) client is wired in as a provider too. It
@@ -195,6 +224,12 @@ GEPH_EXIT_BIN=../geph5/bin-out/geph5-exit \
 GEPH_TEST_TARGET=223.5.5.5:80 \
 GOTOOLCHAIN=go1.26.8 go test -run TestE2E_Geph -v ./test/e2e/
 ```
+
+Its standalone counterpart — `TestE2E_GephProviderStandalone` — needs no env
+vars and no Rust binary: the provider's `embedded_exit` option runs the Go
+exit inside the test process, so the whole chain (engine, admin API, geph
+client, geph exit, target) is one process. It runs in the default suite
+above.
 
 The tor provider's real-network check (a full engine with an inbound routed
 through the tor pool, asserting `IsTor:true` from check.torproject.org) is

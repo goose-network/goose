@@ -207,7 +207,12 @@ is live, since CONNECTs fail before that; readiness is reported via the
 `Watch()` signal so the pool fills as soon as the tunnel comes up. It also
 demonstrates the variant of plugin placement where the plugin lives inside
 the embedded project's repo (to use its `internal/` packages) and goose pulls
-it in via `require` + `replace`.
+it in via `require` + `replace`. Its `embedded_exit` config option goes one
+step further and boots the geph5 exit itself (a Go port of the Rust
+`geph5-exit` serving path) inside the engine's process, pinned by an
+auto-generated direct constraint — the fully standalone deployment where
+goose + geph client + geph exit are one binary, verified in the default test
+suite (`TestE2E_GephProviderStandalone`).
 
 The [tor provider](../tor-go/plugins/tor) is a third example — a slow-boot
 one. It embeds tor-go (a from-scratch Go Tor client) and contributes the
