@@ -90,10 +90,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 	defer m.mu.Unlock()
 
 	// Restart changed specs and drop removed ones.
-	have := map[string]specCancel{}
-	for _, sc := range m.running {
-		have[sc.spec.ID] = sc
-	}
+	kept := map[string]struct{}{}
 	next := m.running[:0]
 	for _, sc := range m.running {
 		w, ok := want[sc.spec.ID]
@@ -102,18 +99,25 @@ func (m *Manager) reconcile(ctx context.Context) {
 			continue
 		}
 		next = append(next, sc)
+		kept[sc.spec.ID] = struct{}{}
 	}
+	// Commit the kept set BEFORE starting new specs: startOneLocked appends
+	// to m.running, so assigning m.running after the start loop would
+	// truncate those entries out of the running set — the next reconcile
+	// would then consider the spec not-running and start yet another
+	// instance of it (leaking the old goroutine), on every config bump.
+	m.running = next
 
-	// Start specs not already running.
+	// Start specs not already running (kept), including ones just cancelled
+	// above because their config changed.
 	for id, w := range want {
-		if _, ok := have[id]; ok {
+		if _, ok := kept[id]; ok {
 			continue
 		}
 		if err := m.startOneLocked(ctx, w); err != nil {
 			fmt.Printf("provider: start %s: %v\n", id, err)
 		}
 	}
-	m.running = next
 }
 
 // specCancel pairs a running provider's goroutine cancel with the spec it

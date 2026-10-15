@@ -5,6 +5,7 @@
 package include
 
 import (
+	_ "github.com/geph-official/geph5-go/plugins/geph"
 	_ "github.com/goose-network/goose-plugin-mihomo"
 	_ "github.com/goose-network/goose-plugin-psiphon"
 	_ "github.com/goose-network/goose-plugin-singbox"
