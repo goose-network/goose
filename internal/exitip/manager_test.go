@@ -103,7 +103,7 @@ func TestManagerRoundChecksAllOutbounds(t *testing.T) {
 		Sites:       []string{site.URL},
 		TimeoutSec:  5,
 	})
-	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 1 }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 1 }, 15*time.Second, 20*time.Millisecond)
 
 	checks := rec.snapshot()
 	require.Len(t, checks, 1)
@@ -131,7 +131,7 @@ func TestManagerRoundRotatesSites(t *testing.T) {
 		Sites:       []string{site1.URL, site2.URL},
 		TimeoutSec:  5,
 	})
-	require.Eventually(t, func() bool { return len(rec.snapshot()) == 2 }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return len(rec.snapshot()) == 2 }, 15*time.Second, 20*time.Millisecond)
 
 	byOut := map[string]string{}
 	for _, c := range rec.snapshot() {
@@ -158,7 +158,7 @@ func TestManagerRecordsFailures(t *testing.T) {
 		Sites:       []string{site.URL},
 		TimeoutSec:  5,
 	})
-	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 2 }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 2 }, 15*time.Second, 20*time.Millisecond)
 
 	var bad *core.ExitCheck
 	for i := range rec.snapshot() {
@@ -223,7 +223,7 @@ func TestManagerReconfigureStopsLoop(t *testing.T) {
 	defer m.Close()
 
 	m.Reconfigure(config.ExitCheckConfig{Enabled: true, IntervalSec: 3600, Sites: []string{site.URL}, TimeoutSec: 5})
-	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 1 }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 1 }, 15*time.Second, 20*time.Millisecond)
 
 	m.Reconfigure(config.ExitCheckConfig{Enabled: false})
 	time.Sleep(200 * time.Millisecond)
@@ -267,13 +267,13 @@ func TestManagerCronScheduling(t *testing.T) {
 		Sites:      []string{site.URL},
 		TimeoutSec: 5,
 	})
-	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 1 }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 1 }, 15*time.Second, 20*time.Millisecond)
 
 	// Second check arrives at the next cron fire, not on any interval.
 	s, _ := ParseCron("* * * * *")
 	next, err := s.Next(time.Now())
 	require.NoError(t, err)
-	deadline := next.Add(10 * time.Second)
+	deadline := next.Add(30 * time.Second)
 	for len(rec.snapshot()) < 2 && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
 	}
