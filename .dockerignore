@@ -1,0 +1,9 @@
+# Build context: only what the Dockerfile COPYs. Keep the tree's
+# untracked build artifacts, databases, and VCS data out of the image.
+goose
+*.db
+*.db-*
+.git
+.github
+test/e2e
+node_modules

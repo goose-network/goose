@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Re-point goose's local replace directives (../sibling repos) at the
+# published GitHub repositories, pinned to the exact revisions the local
+# tree was tested against. CI runs this before building (the sibling
+# checkouts do not exist on a runner); the Dockerfile carries the same pins
+# as ARGs. Keep the pins here and there in sync — the versions are the
+# local HEADs of the sibling repos at the time of the last green build.
+#
+# OpenRung-go is a private repository: callers must pass its access token
+# (a GitHub PAT with repo read) via GOSE_GITHUB_TOKEN (or GITHUB_TOKEN);
+# the token is exported to git through GIT_CONFIG_* environment variables
+# so it never lands in any file.
+#
+# Usage: scripts/pin-replacements.sh [--check]
+#   --check  compare the pins against local sibling HEADs and exit 1 if
+#            any has drifted (CI guard, run after local builds).
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+pins=(
+  github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20260923221657-7ba364a3ef3c
+  github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20260924055847-0cb94efc10fd
+  github.com/Psiphon-Labs/psiphon-tunnel-core=github.com/goose-network/psiphon-tunnel-core@v0.0.0-20260923221754-213987d32b71
+  github.com/goose-network/goose-plugin-mihomo=github.com/goose-network/goose-plugin-mihomo@v0.0.0-20261015113701-b4a0a13af363
+  github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261008003930-ac2ef3022d4f
+  github.com/metacubex/mihomo=github.com/metacubex/mihomo@v0.0.0-20260922124647-afe94dafef8c
+  github.com/sagernet/sing-box=github.com/sagernet/sing-box@v0.0.0-20260922113237-e5e705ed802d
+  github.com/geph-official/geph5-go=github.com/goose-network/geph5-go@v0.0.0-20261024111313-8c6ac2fbe21d
+  github.com/goose-network/openrung-go=github.com/goose-network/openrung-go@v0.0.0-20261015113945-02801c2ff446
+  github.com/openrung/openrung/brokerapi=github.com/openrung/openrung/brokerapi@v0.7.1-0.20260923074427-404d84a15812
+)
+
+# Map replace module -> sibling checkout directory (repo name only; all
+# siblings live as siblings of the goose repo in the dev tree).
+declare -A sibling_dir=(
+  [github.com/goose-network/goose-plugin-api]=goose-plugin-api
+  [github.com/goose-network/goose-plugin-psiphon]=psiphon
+  [github.com/Psiphon-Labs/psiphon-tunnel-core]=psiphon-tunnel-core
+  [github.com/goose-network/goose-plugin-mihomo]=mihomo-plugin
+  [github.com/goose-network/goose-plugin-singbox]=singbox-plugin
+  [github.com/metacubex/mihomo]=mihomo
+  [github.com/sagernet/sing-box]=sing-box
+  [github.com/geph-official/geph5-go]=geph5-go
+  [github.com/goose-network/openrung-go]=openrung-go
+  [github.com/openrung/openrung/brokerapi]=openrung
+)
+
+if [[ "${1:-}" == "--check" ]]; then
+  # Check mode: pins must match the local sibling HEADs. Siblings that do
+  # not exist locally are skipped (not all dev trees have every repo).
+  status=0
+  for spec in "${pins[@]}"; do
+    mod="${spec%%=*}"
+    dir="../${sibling_dir[$mod]}"
+    if [[ ! -d "$dir/.git" ]]; then
+      echo "skip (no local checkout): $mod"
+      continue
+    fi
+    head=$(git -C "$dir" rev-parse HEAD)
+    short="${head:0:12}"
+    if [[ "$spec" != *"-$short" ]]; then
+      echo "DRIFTED: $mod pin=$spec local=$short" >&2
+      status=1
+    fi
+  done
+  exit $status
+fi
+
+# Apply mode: re-point every local replace at its published pin.
+for spec in "${pins[@]}"; do
+  mod="${spec%%=*}"
+  # shellcheck disable=SC2086
+  go mod edit -replace="$spec"
+done
+
+# Private dependency: go must fetch openrung-go directly from authenticated
+# git instead of the sum database / module proxy (both 404 on private
+# repos). The token comes from the environment and is only visible to the
+# go tool's child git processes.
+if [[ -n "${GOSE_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}" ]]; then
+  export GOPRIVATE=github.com/goose-network/openrung-go
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="url.https://x-access-token:${GOSE_GITHUB_TOKEN:-${GH_TOKEN:-$GITHUB_TOKEN}}@github.com/.insteadOf"
+  export GIT_CONFIG_VALUE_0="https://github.com/"
+else
+  echo "scripts/pin-replacements.sh: note: no token set; private deps (openrung-go) will only resolve if git already has credentials." >&2
+fi
+
+echo "scripts/pin-replacements.sh: replace directives re-pointed at published pins."

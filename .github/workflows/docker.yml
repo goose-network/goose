@@ -1,0 +1,73 @@
+name: Docker
+
+# On every push to main: build a multi-arch (linux/amd64 + linux/arm64)
+# goose engine image and publish it to GHCR. The Dockerfile re-points the
+# local replace directives at published pins via scripts/pin-replacements.sh
+# (same source of truth as the OpenAPI workflow), cross-compiles from the
+# runner's native arch (CGO disabled — no QEMU needed), and stages the
+# binary into distroless static.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Keep the distroless tag pinned so image rebuilds are reproducible;
+      # the digest is recorded in the build summary.
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # main builds tag both :main and :latest; the sha tag pins the
+          # exact commit for rollback and bisection.
+          tags: |
+            ghcr.io/goose-network/goose:main
+            ghcr.io/goose-network/goose:latest
+            ghcr.io/goose-network/goose:sha-${{ github.sha }}
+          # The one private dependency (openrung-go) needs authenticated
+          # git; pass the org PAT as a BuildKit secret. It is consumed via
+          # the environment inside one RUN and never lands in a layer.
+          secrets: |
+            github_token=${{ secrets.GH_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Inspect published image
+        run: |
+          docker buildx imagetools inspect \
+            ghcr.io/goose-network/goose:sha-${{ github.sha }} \
+            | tee image-manifest.txt
+
+      - name: Upload manifest summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-manifest
+          path: image-manifest.txt
+          retention-days: 7

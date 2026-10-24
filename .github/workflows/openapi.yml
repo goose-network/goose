@@ -28,6 +28,10 @@ concurrency:
 jobs:
   generate:
     runs-on: ubuntu-latest
+    env:
+      # openrung-go is a private repo: fetch it from authenticated git,
+      # bypassing the module proxy and sum database (both 404 on it).
+      GOPRIVATE: github.com/goose-network/openrung-go
     steps:
       - uses: actions/checkout@v4
 
@@ -35,19 +39,26 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Private module fetches (openrung-go) need git credentials; the
+      # workflow's own GITHUB_TOKEN cannot read other repos, so use the
+      # org PAT. Fork PRs don't get the secret and will fail at fetch —
+      # acceptable: this repo has private deps and can't build from forks
+      # anyway.
+      - name: Authenticate git for private module fetches
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+            git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf https://github.com/
+          fi
+
       # The go.mod replace directives point at sibling checkouts that do
       # not exist on CI. Re-point them at the published GitHub repos, pinned
-      # to pseudo-versions, so the build resolves over the network.
+      # to the exact revisions the local tree was tested against; the pin
+      # list lives in scripts/pin-replacements.sh (the Dockerfile uses the
+      # same script, so the two cannot drift).
       - name: Re-point local replace directives at published repos
-        run: |
-          go mod edit \
-            -replace=github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20260923221657-7ba364a3ef3c \
-            -replace=github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20260924055847-0cb94efc10fd \
-            -replace=github.com/goose-network/goose-plugin-mihomo=github.com/goose-network/goose-plugin-mihomo@v0.0.0-20261004175635-b916aa8de2de \
-            -replace=github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261004175644-403bc49594ea \
-            -replace=github.com/metacubex/mihomo=github.com/metacubex/mihomo@v0.0.0-20260922124647-afe94dafef8c \
-            -replace=github.com/sagernet/sing-box=github.com/sagernet/sing-box@v0.0.0-20260922113237-e5e705ed802d \
-            -replace=github.com/Psiphon-Labs/psiphon-tunnel-core=github.com/goose-network/psiphon-tunnel-core@v0.0.0-20260923221754-213987d32b71
+        run: scripts/pin-replacements.sh
 
       - name: Resolve pinned modules
         run: go mod tidy

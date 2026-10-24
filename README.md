@@ -18,6 +18,30 @@ The Go 1.26.8 toolchain pin is required because the bundled Psiphon
 provider plugin pulls in `psiphon-tunnel-core`, whose `psiphon-tls` is
 ABI-incompatible with Go 1.27.
 
+## Docker
+
+CI publishes a multi-arch (`linux/amd64`, `linux/arm64`) engine image to
+GHCR on every push to main:
+
+```bash
+docker pull ghcr.io/goose-network/goose:latest
+docker run -d -p 9090:9090 -v goose-data:/data \
+    ghcr.io/goose-network/goose:latest
+```
+
+The image is distroless (static, nonroot). With no `-config` argument the
+engine starts with empty defaults and is configured through the admin API.
+State (the metrics bbolt DB) lives in `/data`.
+
+Only the admin API port is declaratively exposed; inbound proxy ports are
+config-driven — publish them with `-p` as they appear in your config.
+
+The build re-points the dev-tree replace directives at published pins via
+`scripts/pin-replacements.sh` (single source of truth; the OpenAPI and
+Docker workflows use the same script) and cross-compiles, so no QEMU is
+involved. The one private dependency (`openrung-go`) is fetched with an
+authenticated git BuildKit secret.
+
 ## Run
 
 ```bash

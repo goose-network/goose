@@ -1,0 +1,79 @@
+# Multi-stage Dockerfile for the goose engine.
+#
+# Build (multi-arch, as CI does):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     --secret id=github_token,src=<token-file> \
+#     -t ghcr.io/goose-network/goose:main .
+#
+# The committed go.mod points the replaced modules at sibling checkouts
+# (../goose-plugin-api, ../geph5-go, ...) that only exist in the dev tree.
+# scripts/pin-replacements.sh re-points them at the published GitHub
+# repositories, pinned to the exact revisions the local tree was tested
+# against; it is the single source of truth for the pins (CI workflows call
+# it too). The github_token secret is only needed for the one private
+# dependency (openrung-go); everything else resolves through the Go module
+# proxy. The token is a BuildKit secret mount, consumed through the
+# environment, so it never lands in an image or cache layer.
+#
+# The runtime stage is distroless static (ca-certificates + tzdata
+# included) and runs as nonroot. State (the metrics bbolt DB) lives in
+# /data, which is the volume mount point.
+
+FROM golang:1.26.8 AS build
+
+# Cross-compile for the target arch from the runner's native arch: goose is
+# pure Go with CGO disabled, so neither arch needs QEMU emulation.
+ARG TARGETOS
+ARG TARGETARCH
+
+# Module proxy: the default suits CI; builders in restricted networks can
+# override with --build-arg GOPROXY=https://goproxy.cn,direct.
+ARG GOPROXY=proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY scripts/ scripts/
+
+# Re-point the sibling replace directives at the published pins. Pure
+# go mod edit: no network, no source needed, so this layer only rebuilds
+# when the pins change.
+RUN scripts/pin-replacements.sh
+
+COPY . .
+
+# go mod tidy runs here, after the source is present: it needs the import
+# graph to compute the require set, and it records the pinned versions'
+# checksums in go.sum. The module cache rides a BuildKit cache mount so
+# rebuilt images skip re-downloading the world. The token secret
+# authenticates the private openrung-go fetch through git's environment.
+RUN --mount=type=cache,sharing=locked,id=modcache-${TARGETOS}-${TARGETARCH},target=/go/pkg/mod \
+    --mount=type=secret,id=github_token \
+    if [ -f /run/secrets/github_token ]; then \
+      export GOSE_GITHUB_TOKEN="$(cat /run/secrets/github_token)"; \
+    fi; \
+    scripts/pin-replacements.sh && \
+    go mod tidy && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -o /out/goose ./cmd/goose && \
+    mkdir -p /out/state
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/goose /usr/local/bin/goose
+
+# The empty state dir seeds /data with nonroot ownership so a named volume
+# created from it stays writable; bind mounts must be chowned 65532:65532
+# on the host. With no -config argument the engine starts with empty
+# defaults and is configured through the admin API; pass
+# "-config /config/goose.json" to start from a mounted config instead.
+COPY --from=build --chown=nonroot:nonroot /out/state/ /data/
+WORKDIR /data
+VOLUME /data
+
+# Admin API port; the engine default binds 127.0.0.1:9090 (reachable via
+# --network=container or a config that binds 0.0.0.0). Inbound proxy ports
+# are config-driven — publish them with -p as needed.
+EXPOSE 9090
+
+ENTRYPOINT ["/usr/local/bin/goose"]
