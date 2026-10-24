@@ -11,7 +11,10 @@
 # the token is exported to git through GIT_CONFIG_* environment variables
 # so it never lands in any file.
 #
-# Usage: scripts/pin-replacements.sh [--check]
+# Usage: scripts/pin-replacements.sh [--tidy] [--check]
+#   --tidy   after re-pointing, run "go mod tidy" as a child of this
+#            script so it inherits the git credentials exported above
+#            (exports do not survive into a calling shell).
 #   --check  compare the pins against local sibling HEADs and exit 1 if
 #            any has drifted (CI guard, run after local builds).
 
@@ -47,7 +50,14 @@ declare -A sibling_dir=(
   [github.com/openrung/openrung/brokerapi]=openrung
 )
 
+tidy=0
 if [[ "${1:-}" == "--check" ]]; then
+  tidy=-1 # check mode: never tidy
+elif [[ "${1:-}" == "--tidy" ]]; then
+  tidy=1
+fi
+
+if [[ $tidy -eq -1 ]]; then
   # Check mode: pins must match the local sibling HEADs. Siblings that do
   # not exist locally are skipped (not all dev trees have every repo).
   status=0
@@ -89,3 +99,9 @@ else
 fi
 
 echo "scripts/pin-replacements.sh: replace directives re-pointed at published pins."
+
+# Tidy must run here — imports of tidy in the calling RUN shell don't see
+# the exports above, and GOPRIVATE alone doesn't authenticate git.
+if [[ $tidy -eq 1 ]]; then
+  go mod tidy
+fi

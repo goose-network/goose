@@ -42,18 +42,19 @@ RUN scripts/pin-replacements.sh
 
 COPY . .
 
-# go mod tidy runs here, after the source is present: it needs the import
-# graph to compute the require set, and it records the pinned versions'
-# checksums in go.sum. The module cache rides a BuildKit cache mount so
-# rebuilt images skip re-downloading the world. The token secret
+# go mod tidy runs inside scripts/pin-replacements.sh --tidy, as a child
+# of the script so it inherits the private-repo git credentials — exports
+# do not survive into this RUN shell. Tidy needs the source present: it
+# computes the require set from the import graph and records the pinned
+# versions' checksums in go.sum. The module cache rides a BuildKit cache
+# mount so rebuilt images skip re-downloading the world. The token secret
 # authenticates the private openrung-go fetch through git's environment.
 RUN --mount=type=cache,sharing=locked,id=modcache-${TARGETOS}-${TARGETARCH},target=/go/pkg/mod \
     --mount=type=secret,id=github_token \
     if [ -f /run/secrets/github_token ]; then \
       export GOSE_GITHUB_TOKEN="$(cat /run/secrets/github_token)"; \
     fi; \
-    scripts/pin-replacements.sh && \
-    go mod tidy && \
+    scripts/pin-replacements.sh --tidy && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -o /out/goose ./cmd/goose && \
     mkdir -p /out/state
