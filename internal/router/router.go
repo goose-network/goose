@@ -49,6 +49,14 @@ type Router struct {
 	// of resetting to 0 (which would always pick the first outbound).
 	fallback *fallbackSelector
 
+	// probes is the latest reachability verdicts per outbound for
+	// access-filtered pools (auto chains); guarded by probeMu. probeCtl runs
+	// the probe loop. Both are wired in probe.go.
+	probeMu    sync.RWMutex
+	probes     map[string]*probeEntry
+	probeCtl   *probeCtl
+	probeCtlMu sync.Mutex
+
 	copyBufPool sync.Pool
 	metricSeq   uint64
 }
@@ -75,6 +83,10 @@ type builtPool struct {
 	outbounds []core.Outbound
 	filters   []core.Filter
 	selector  core.Selector
+	// access is non-nil for an auto-chained pool: the pool's access filter
+	// config (access pool + probe cadence), used by the prober and by
+	// dispatch-time chain building.
+	access *config.AccessFilterSpec
 }
 
 // New creates a router. The stack is used as the underlying dialer for
@@ -88,10 +100,17 @@ func New(cfg *config.Store, ms *metrics.Store, stk stack.Stack) *Router {
 		pools:       map[string]*builtPool{},
 		chains:      map[string]core.Chain{},
 		fallback:    &fallbackSelector{},
+		probes:      map[string]*probeEntry{},
 		copyBufPool: sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }},
 	}
 	r.rebuild()
 	return r
+}
+
+// Close stops the router's background probe loop. The router has no other
+// owned resources; the engine closes it before the stack and metrics store.
+func (r *Router) Close() {
+	r.stopProber()
 }
 
 // Rebuild reconciles runtime objects from the current config. Called on
@@ -144,6 +163,7 @@ func (r *Router) rebuild() {
 		} else {
 			bp.selector = &fallbackSelector{}
 		}
+		bp.access = p.Access
 		r.pools[p.ID] = bp
 	}
 	// build chains. Each layer's selector is wrapped in a poolSelector that
@@ -163,7 +183,7 @@ func (r *Router) rebuild() {
 			}
 			ch = append(ch, core.ChainLayer{
 				Filters:  bp.filters,
-				Selector: &poolSelector{Selector: sel, pool: bp.outbounds},
+				Selector: &poolSelector{Selector: sel, poolID: bp.id, pool: bp.outbounds},
 			})
 		}
 		r.chains[c.ID] = ch
@@ -192,6 +212,10 @@ func (r *Router) rebuild() {
 		}
 		r.policy.inbounds[in.ID] = ip
 	}
+	// Wire the reachability prober for access-filtered pools (auto chains):
+	// start it when the first pool gains an access filter, re-parameterize
+	// when cadences change, stop it when the last one goes away.
+	r.reconcileProberLocked()
 }
 
 // buildRoute synthesizes the single-layer chain for a policy that names a
@@ -219,7 +243,7 @@ func (r *Router) buildRoute(p config.InboundPolicy) core.Chain {
 	}
 	return core.Chain{{
 		Filters:  filters,
-		Selector: &poolSelector{Selector: sel, pool: bp.outbounds},
+		Selector: &poolSelector{Selector: sel, poolID: bp.id, pool: bp.outbounds},
 	}}
 }
 
@@ -345,9 +369,10 @@ func (r *Router) Bridge(inbound, upstream net.Conn, meta core.Metadata) {
 }
 
 // dialChain executes the chain: for each layer, filter the pool, select an
-// outbound, and dial. For multi-hop chains, layer N+1 is dialed through the
-// connection established by layer N (the previous conn becomes the transport
-// for the next outbound's server).
+// outbound, and dial. For multi-hop chains, layer N+1's proxy server is
+// dialed through the tunnel established by layer N (the previous conn
+// becomes the transport for the next hop), and only the final layer CONNECTs
+// toward the request's actual target.
 //
 // The per-layer candidate pool and selector are snapshotted under the read
 // lock, but the network dials themselves happen WITHOUT the lock: a slow
@@ -365,41 +390,93 @@ func (r *Router) dialChain(ctx context.Context, chain core.Chain, meta core.Meta
 	}
 	r.mu.RUnlock()
 
-	var conn net.Conn
-	chainIDs := make([]string, 0, len(chain))
+	return r.dialLayers(ctx, layers, meta)
+}
+
+// dialLayers dials the snapshotted layers left-to-right. Real proxy
+// chaining: hop i tunnels toward hop i+1's proxy-server address, and only
+// the final hop tunnels toward the request's actual target — so every
+// layer's outbound is selected BEFORE the first dial (hop i's dial target
+// depends on hop i+1's selection). When the first layer's pool is
+// access-filtered and the selected member's server is unreachable directly,
+// an access-proxy hop is prepended automatically (probe-driven auto chain).
+//
+// Dials happen outside the router lock, per dialChain's comment.
+func (r *Router) dialLayers(ctx context.Context, layers []snapshottedLayer, meta core.Metadata) (net.Conn, []string, error) {
+	// Select every layer's outbound up front. This also means empty-pool /
+	// filter / select errors surface with no connections open — nothing to
+	// leak — and the error still carries the outbounds selected so far.
+	type hop struct {
+		out   core.Outbound
+		relay core.Outbound // access proxy prepended for layer 0, if probed
+	}
+	hops := make([]hop, len(layers))
+	chainIDs := make([]string, 0, len(layers))
 	for i, sl := range layers {
-		if len(sl.pool) == 0 {
-			if conn != nil {
-				conn.Close()
+		pool := sl.pool
+		// An auto-chained pool's candidates are narrowed by the latest
+		// reachability probes: members known-unreachable both directly and
+		// through the access pool are dropped.
+		if bp := r.poolOfLayer(sl); bp != nil && bp.access != nil {
+			pool = r.reachableCandidates(pool)
+			if len(pool) == 0 {
+				return nil, chainIDs, fmt.Errorf("router: layer %d no reachable outbound (probe failed directly and via access pool)", i)
 			}
+		}
+		if len(pool) == 0 {
 			return nil, chainIDs, fmt.Errorf("router: layer %d empty pool", i)
 		}
-		filtered := applyFilters(sl.filters, sl.pool, meta)
+		filtered := applyFilters(sl.filters, pool, meta)
 		if len(filtered) == 0 {
-			if conn != nil {
-				conn.Close()
-			}
 			return nil, chainIDs, fmt.Errorf("router: layer %d no outbound passed filters", i)
 		}
 		out, err := sl.selector.Pick(filtered, meta)
 		if err != nil {
-			if conn != nil {
-				conn.Close()
-			}
 			return nil, chainIDs, fmt.Errorf("router: layer %d select: %w", i, err)
 		}
-		chainIDs = append(chainIDs, out.ID())
+		hops[i] = hop{out: out}
+	}
+	// The relay applies to the first layer only: later hops are reached
+	// through the previous layer's tunnel, not the engine's local network.
+	if len(hops) > 0 {
+		if bp := r.poolOfLayer(layers[0]); bp != nil && bp.access != nil {
+			hops[0].relay = r.relayFor(hops[0].out)
+		}
+	}
 
-		// Dial this layer's outbound. For the first layer, the outbound
-		// dials its own server through the engine stack and then to the
-		// target. For subsequent layers, the outbound dials its server
-		// through the previous conn (chaining).
-		dialed, err, consumed := r.dialOutbound(ctx, out, conn, meta)
+	var conn net.Conn
+	for i, h := range hops {
+		if h.relay != nil {
+			chainIDs = append(chainIDs, h.relay.ID())
+		}
+		chainIDs = append(chainIDs, h.out.ID())
+
+		// Hop i's dial target: hop i+1's proxy-server address, or the
+		// request's target for the final hop.
+		target := meta.Target()
+		if i+1 < len(hops) {
+			if next := hops[i+1].out.Address(); next != "" {
+				target = next
+			}
+		}
+
+		if h.relay != nil {
+			// Auto chain: dial the access proxy toward this hop's server,
+			// then handshake with this hop through that tunnel.
+			dialed, derr := r.dialRelayed(ctx, h.out, h.relay, meta, target)
+			if derr != nil {
+				return nil, chainIDs, fmt.Errorf("router: layer 0 relay %s dial %s: %w", h.relay.ID(), h.out.ID(), derr)
+			}
+			conn = dialed
+			continue
+		}
+
+		dialed, err, consumed := r.dialOutbound(ctx, h.out, conn, meta, target)
 		if err != nil {
 			if conn != nil {
 				conn.Close()
 			}
-			return nil, chainIDs, fmt.Errorf("router: layer %d dial %s: %w", i, out.ID(), err)
+			return nil, chainIDs, fmt.Errorf("router: layer %d dial %s: %w", i, h.out.ID(), err)
 		}
 		// If the dial did not consume the previous conn (chaining fell back
 		// to a direct dial), close it to avoid leaking one conn per hop.
@@ -412,6 +489,21 @@ func (r *Router) dialChain(ctx context.Context, chain core.Chain, meta core.Meta
 		return nil, chainIDs, errors.New("router: empty chain")
 	}
 	return conn, chainIDs, nil
+}
+
+// poolOfLayer recovers the built pool a snapshotted layer came from, by the
+// poolID carried on the layer's poolSelector. Layers synthesized without a
+// pool (the fallback chain) return nil. The returned *builtPool is an
+// immutable snapshot: rebuild replaces the pools map wholesale and never
+// mutates a builtPool in place.
+func (r *Router) poolOfLayer(sl snapshottedLayer) *builtPool {
+	ps, ok := sl.selector.(*poolSelector)
+	if !ok || ps.poolID == "" {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.pools[ps.poolID]
 }
 
 // snapshottedLayer is a chain layer's immutable view captured under the read
@@ -437,21 +529,25 @@ func (r *Router) layerPool(layer core.ChainLayer) []core.Outbound {
 }
 
 // poolSelector wraps a real selector and carries the pool's candidate
-// outbounds so the router can recover them at dispatch time.
+// outbounds so the router can recover them at dispatch time. poolID records
+// which built pool supplied the candidates (for access-filter narrowing).
 type poolSelector struct {
 	core.Selector
-	pool []core.Outbound
+	poolID string
+	pool   []core.Outbound
 }
 
-// dialOutbound dials an outbound. If prev is non-nil, the outbound dials its
-// server through prev (chaining); otherwise through the engine stack. The
-// returned consumed flag is true when prev was handed off to the outbound
-// (DialThrough took ownership); false when the dial fell back to a direct
-// dial and prev is still the caller's responsibility to close.
-func (r *Router) dialOutbound(ctx context.Context, o core.Outbound, prev net.Conn, meta core.Metadata) (net.Conn, error, bool) {
+// dialOutbound dials an outbound toward target. If prev is non-nil, the
+// outbound's server is reached through prev (chaining) and the outbound then
+// CONNECTs toward target through that tunnel; otherwise the outbound dials
+// target through its own server via the engine stack. The returned consumed
+// flag is true when prev was handed off to the outbound (DialThrough took
+// ownership); false when the dial fell back to a direct dial and prev is
+// still the caller's responsibility to close.
+func (r *Router) dialOutbound(ctx context.Context, o core.Outbound, prev net.Conn, meta core.Metadata, target string) (net.Conn, error, bool) {
 	if prev == nil {
 		// first hop: outbound dials target through its own server via stack.
-		c, err := o.DialContext(ctx, meta.Network, meta.Target())
+		c, err := o.DialContext(ctx, meta.Network, target)
 		return c, err, false
 	}
 	// chaining: dial the next outbound's server through prev, then have it
@@ -465,13 +561,32 @@ func (r *Router) dialOutbound(ctx context.Context, o core.Outbound, prev net.Con
 		inner = w.Unwrap()
 	}
 	if cd, ok := inner.(ChainDialer); ok {
-		c, err := cd.DialThrough(ctx, meta.Network, meta.Target(), prev)
+		c, err := cd.DialThrough(ctx, meta.Network, target, prev)
 		return c, err, true
 	}
 	// no chaining support: dial directly (chain collapses to this hop).
 	// prev is NOT consumed; caller closes it.
-	c, err := o.DialContext(ctx, meta.Network, meta.Target())
+	c, err := o.DialContext(ctx, meta.Network, target)
 	return c, err, false
+}
+
+// dialRelayed dials out's server through relay (the access proxy) and then
+// has out connect toward target through that tunnel — the auto-chain first
+// hop. The relay conn is ours until handoff, so it is closed on every path
+// where the outbound did not take ownership.
+func (r *Router) dialRelayed(ctx context.Context, out, relay core.Outbound, meta core.Metadata, target string) (net.Conn, error) {
+	rc, err := relay.DialContext(ctx, meta.Network, out.Address())
+	if err != nil {
+		return nil, fmt.Errorf("relay %s dial %s: %w", relay.ID(), out.ID(), err)
+	}
+	dialed, derr, consumed := r.dialOutbound(ctx, out, rc, meta, target)
+	if derr != nil || !consumed {
+		// DialThrough impls close via on error and on success; a double
+		// close is harmless. !consumed means chaining fell back to a
+		// direct dial, so the tunnel is simply unused.
+		_ = rc.Close()
+	}
+	return dialed, derr
 }
 
 // ChainDialer is an optional capability an outbound plugin implements to

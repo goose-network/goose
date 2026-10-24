@@ -7,6 +7,7 @@ package config
 
 import (
 	"sync"
+	"time"
 )
 
 // Engine is the top-level configuration.
@@ -19,6 +20,11 @@ type Engine struct {
 	DB string `json:"db"`
 	// Geo is the offline IP database config.
 	Geo GeoConfig `json:"geo"`
+	// ExitChecks configures scheduled exit-IP checks: the engine dials each
+	// outbound and asks an "what is my IP" style site for the exit IP,
+	// recording results. Zero value (disabled) keeps the engine from making
+	// any unsolicited outbound requests.
+	ExitChecks ExitCheckConfig `json:"exit_checks"`
 }
 
 type APIConfig struct {
@@ -89,6 +95,87 @@ type Pool struct {
 	OutboundIDs []string     `json:"outbound_ids"`
 	Filters     []FilterSpec `json:"filters"`
 	Selector    SelectorSpec `json:"selector"`
+	// Access, when set, turns the pool into an auto-chained pool: the engine
+	// probes each member's server for direct reachability from the local
+	// network; members the local ISP cannot reach are dialed through an
+	// access proxy from Access.AccessPoolID (a relay hop is prepended
+	// automatically), and members reachable neither directly nor through the
+	// access pool are dropped from the pool's candidates.
+	Access *AccessFilterSpec `json:"access,omitempty"`
+}
+
+// AccessFilterSpec configures automatic proxy-chain building for a pool.
+type AccessFilterSpec struct {
+	// AccessPoolID is the pool of access (relay) proxies used to reach
+	// members whose servers the local network cannot dial directly (e.g.
+	// proxies behind an ISP block). Required; must reference an existing pool.
+	AccessPoolID string `json:"access_pool_id"`
+	// ProbeIntervalSec is seconds between reachability probe rounds.
+	// Default 300; minimum 10.
+	ProbeIntervalSec int `json:"probe_interval_seconds"`
+	// ProbeTimeoutSec bounds each probe dial. Default 5; minimum 1.
+	ProbeTimeoutSec int `json:"probe_timeout_seconds"`
+}
+
+// EffectiveProbeIntervalSec returns the probe interval with the default
+// applied and the floor enforced.
+func (a *AccessFilterSpec) EffectiveProbeIntervalSec() int {
+	if a.ProbeIntervalSec < 10 {
+		return 300
+	}
+	return a.ProbeIntervalSec
+}
+
+// EffectiveProbeTimeoutSec returns the probe dial timeout with the default
+// applied and the floor enforced.
+func (a *AccessFilterSpec) EffectiveProbeTimeoutSec() int {
+	if a.ProbeTimeoutSec < 1 {
+		return 5
+	}
+	return a.ProbeTimeoutSec
+}
+
+// ExitCheckConfig configures the engine's exit-IP check subsystem: for each
+// configured outbound, dial through it to an "what is my IP" style site and
+// record the observed exit IP. A proxy's connect address is not its exit
+// address — the exit IP can vary by target site and over time — so checks
+// are recorded per (outbound, site) with timestamps.
+type ExitCheckConfig struct {
+	// Enabled turns scheduled checks on. Default false.
+	Enabled bool `json:"enabled"`
+	// Cron is a 5-field crontab expression (min hour dom mon dow) for the
+	// check schedule. When set it takes precedence over IntervalSec.
+	Cron string `json:"cron"`
+	// IntervalSec is seconds between check rounds, used when Cron is empty.
+	IntervalSec int `json:"interval_seconds"`
+	// Sites are exit-IP check URLs that respond with the caller's IP as
+	// plain text (e.g. https://ifconfig.me). Checks rotate round-robin
+	// across this list so large batches spread load instead of tripping one
+	// site's rate limits. Empty selects the built-in defaults.
+	Sites []string `json:"sites"`
+	// TimeoutSec bounds each check. Default 15; minimum 1.
+	TimeoutSec int `json:"timeout_seconds"`
+	// Concurrency caps parallel checks in one round, protecting the check
+	// sites (and their rate limits) from a burst. Default 4; minimum 1.
+	Concurrency int `json:"concurrency"`
+}
+
+// EffectiveTimeoutSec returns the per-check timeout with the default
+// applied and the floor enforced.
+func (c *ExitCheckConfig) EffectiveTimeoutSec() time.Duration {
+	if c.TimeoutSec < 1 {
+		return 15 * time.Second
+	}
+	return time.Duration(c.TimeoutSec) * time.Second
+}
+
+// EffectiveConcurrency returns the parallel-check cap with the default
+// applied and the floor enforced.
+func (c *ExitCheckConfig) EffectiveConcurrency() int {
+	if c.Concurrency < 1 {
+		return 4
+	}
+	return c.Concurrency
 }
 
 // FilterSpec configures one filter dimension.
@@ -448,11 +535,12 @@ func (s *Store) SetProviderOutbounds(providerID, poolID string, specs []*Outboun
 		OutboundIDs: ids,
 	}
 	if existing, ok := s.pools[poolID]; ok {
-		// keep user-configured filters/selector; if the pool is brand-new and
-		// has no selector, the router falls back to a round-robin-style
-		// fallback selector.
+		// keep user-configured filters/selector/access; if the pool is
+		// brand-new and has no selector, the router falls back to a
+		// round-robin-style fallback selector.
 		pool.Filters = existing.Filters
 		pool.Selector = existing.Selector
+		pool.Access = existing.Access
 	}
 	s.pools[poolID] = pool
 

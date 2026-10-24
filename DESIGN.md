@@ -224,3 +224,50 @@ placement variant: tor-go is tagged as its own versioned module
 (`github.com/goose-network/tor-go`), so goose requires it directly from the
 module proxy with no local `replace` — the wiring every sibling plugin
 converges on once it is tagged.
+
+## Auto-built chains (access pools)
+
+Local networks reach only some proxy servers directly; an ISP may block the
+rest. A pool carrying an `access` filter (`access_pool_id`,
+`probe_interval_seconds`, `probe_timeout_seconds`) closes the gap without
+manual chain editing:
+
+- **Prober** (router-internal loop, `internal/router/probe.go`): for every
+  member of every access-filtered pool, dial the member's server (a) through
+  the engine stack ("direct") and, on failure, (b) through each access-pool
+  candidate ("relay"). Rounds run on the smallest configured interval and
+  are nudged on rebuild so new members are probed promptly. Verdicts are
+  kept per outbound and exposed via `GET /api/chains/probes`.
+- **Dispatch** narrows each access-filtered pool to its reachable members
+  (fail-open before the first verdict) and prepends the recorded relay
+  (engine → access → member) for members that need it. Members unreachable
+  both ways are dropped rather than dialed-into-failure.
+- **Per-hop dialing** (`dialLayers`): a chain's layers are selected up
+  front, so hop *i* CONNECTs toward hop *i+1*'s proxy-server address — real
+  multi-hop semantics. The relay-prepended auto chain is exactly this with
+  the access proxy as hop 0.
+
+## Exit-IP checks
+
+The exit IP of a proxy differs from its connect address and varies by
+target site and time, so `internal/exitip` records `(outbound, site, exit
+IP, latency, time)` tuples:
+
+- **Scheduler** — `engine.exit_checks` (disabled by default): cron (5-field
+  Vixie semantics, DOM/DOW OR when both restricted — `internal/exitip/cron.go`)
+  or a fixed interval; an immediate first round populates data without
+  waiting out the schedule. Hot-reloads on config bumps without losing the
+  cron phase; invalid cron is rejected at the API (400).
+- **Checks dial through the outbound** via the router's dispatch dial path
+  (relay hop included), then GET a plain-text "what is my IP" site with
+  `curl`-ish UA and validate the response with `net.ParseIP`. Browsers
+  cannot route `fetch()` through an arbitrary SOCKS5/HTTP proxy, so checks
+  run engine-side; the frontend reads results through the admin API.
+- **Load spreading** — rounds rotate round-robin across the site list, and
+  within a round successive outbounds hit different sites, with a
+  concurrency cap; a large batch therefore spreads over several sites
+  instead of hammering one (rate limits / accidental DDoS).
+- **Persistence** — the metrics store keeps results in the `exitchecks`
+  bucket; `GET /api/exit-checks?n=&outbound_id=` lists them newest-first,
+  `POST /api/exit-checks/run` triggers a round on demand, and the web UI's
+  Exit IP page renders latest-per-outbound, history, and the scheduler.

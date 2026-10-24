@@ -137,6 +137,29 @@
                 }
             }
         },
+        "/api/chains/probes": {
+            "get": {
+                "description": "Returns the latest auto-chain reachability verdict per probed outbound: whether the engine can dial the member's server directly and, when it cannot, whether an access-pool proxy can relay to it (and which one). Members whose server is unreachable both ways are dropped from routing; members reachable only via relay are routed through that relay (auto-built chain).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chains"
+                ],
+                "summary": "List reachability probes for access-filtered pool members",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/core.ProbeStatus"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/chains/{id}": {
             "get": {
                 "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
@@ -326,6 +349,86 @@
                     },
                     "401": {
                         "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/exit-checks": {
+            "get": {
+                "description": "Returns up to n recent exit-IP check records, newest first: for each checked outbound, the site it was asked, the public IP observed at the proxy's exit, latency, and time. Optionally filtered to one outbound. A proxy's connect address is not its exit address, and the exit can vary by site and over time — history makes both visible. Scheduling is configured on the engine resource (exit_checks.enabled / cron / interval_seconds / sites / timeout_seconds / concurrency).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "exit-checks"
+                ],
+                "summary": "List recent exit-IP check results",
+                "parameters": [
+                    {
+                        "maximum": 10000,
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Number of records to return (default 100, max 10000)",
+                        "name": "n",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Only results for this outbound",
+                        "name": "outbound_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/core.ExitCheck"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/exit-checks/run": {
+            "post": {
+                "description": "Starts one exit-IP check round immediately (background); results appear in GET /api/exit-checks as they complete. Uses the engine's exit-check site list, timeout, and concurrency. Scheduling (cron/interval) is unaffected.",
+                "tags": [
+                    "exit-checks"
+                ],
+                "summary": "Trigger an exit-IP check round now",
+                "responses": {
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
                         "schema": {
                             "$ref": "#/definitions/api.errResponse"
                         }
@@ -1642,6 +1745,23 @@
                 }
             }
         },
+        "config.AccessFilterSpec": {
+            "type": "object",
+            "properties": {
+                "access_pool_id": {
+                    "description": "AccessPoolID is the pool of access (relay) proxies used to reach\nmembers whose servers the local network cannot dial directly (e.g.\nproxies behind an ISP block). Required; must reference an existing pool.",
+                    "type": "string"
+                },
+                "probe_interval_seconds": {
+                    "description": "ProbeIntervalSec is seconds between reachability probe rounds.\nDefault 300; minimum 10.",
+                    "type": "integer"
+                },
+                "probe_timeout_seconds": {
+                    "description": "ProbeTimeoutSec bounds each probe dial. Default 5; minimum 1.",
+                    "type": "integer"
+                }
+            }
+        },
         "config.ChainSpec": {
             "type": "object",
             "properties": {
@@ -1672,6 +1792,14 @@
                     "description": "DB is the metrics database path.",
                     "type": "string"
                 },
+                "exit_checks": {
+                    "description": "ExitChecks configures scheduled exit-IP checks: the engine dials each\noutbound and asks an \"what is my IP\" style site for the exit IP,\nrecording results. Zero value (disabled) keeps the engine from making\nany unsolicited outbound requests.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.ExitCheckConfig"
+                        }
+                    ]
+                },
                 "geo": {
                     "description": "Geo is the offline IP database config.",
                     "allOf": [
@@ -1683,6 +1811,38 @@
                 "stack": {
                     "description": "Stack selects the network stack: \"system\" or \"gvisor\".",
                     "type": "string"
+                }
+            }
+        },
+        "config.ExitCheckConfig": {
+            "type": "object",
+            "properties": {
+                "concurrency": {
+                    "description": "Concurrency caps parallel checks in one round, protecting the check\nsites (and their rate limits) from a burst. Default 4; minimum 1.",
+                    "type": "integer"
+                },
+                "cron": {
+                    "description": "Cron is a 5-field crontab expression (min hour dom mon dow) for the\ncheck schedule. When set it takes precedence over IntervalSec.",
+                    "type": "string"
+                },
+                "enabled": {
+                    "description": "Enabled turns scheduled checks on. Default false.",
+                    "type": "boolean"
+                },
+                "interval_seconds": {
+                    "description": "IntervalSec is seconds between check rounds, used when Cron is empty.",
+                    "type": "integer"
+                },
+                "sites": {
+                    "description": "Sites are exit-IP check URLs that respond with the caller's IP as\nplain text (e.g. https://ifconfig.me). Checks rotate round-robin\nacross this list so large batches spread load instead of tripping one\nsite's rate limits. Empty selects the built-in defaults.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "timeout_seconds": {
+                    "description": "TimeoutSec bounds each check. Default 15; minimum 1.",
+                    "type": "integer"
                 }
             }
         },
@@ -1777,6 +1937,14 @@
         "config.Pool": {
             "type": "object",
             "properties": {
+                "access": {
+                    "description": "Access, when set, turns the pool into an auto-chained pool: the engine\nprobes each member's server for direct reachability from the local\nnetwork; members the local ISP cannot reach are dialed through an\naccess proxy from Access.AccessPoolID (a relay hop is prepended\nautomatically), and members reachable neither directly nor through the\naccess pool are dropped from the pool's candidates.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.AccessFilterSpec"
+                        }
+                    ]
+                },
                 "filters": {
                     "type": "array",
                     "items": {
@@ -1850,6 +2018,36 @@
                 }
             }
         },
+        "core.ExitCheck": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                },
+                "exitIP": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "latency": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "outboundID": {
+                    "type": "string"
+                },
+                "site": {
+                    "description": "Site is the host of the check site that was asked (e.g.\n\"ifconfig.me\").",
+                    "type": "string"
+                },
+                "startedAt": {
+                    "type": "string"
+                },
+                "success": {
+                    "type": "boolean"
+                }
+            }
+        },
         "core.Network": {
             "type": "string",
             "enum": [
@@ -1862,6 +2060,54 @@
                 "NetworkTCP",
                 "NetworkUDP"
             ]
+        },
+        "core.ProbeStatus": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string"
+                },
+                "direct": {
+                    "$ref": "#/definitions/core.ProbeVerdict"
+                },
+                "outboundID": {
+                    "type": "string"
+                },
+                "poolID": {
+                    "type": "string"
+                },
+                "relay": {
+                    "$ref": "#/definitions/core.ProbeVerdict"
+                },
+                "relayVia": {
+                    "type": "string"
+                }
+            }
+        },
+        "core.ProbeVerdict": {
+            "type": "object",
+            "properties": {
+                "at": {
+                    "description": "At is when the probe ran.",
+                    "type": "string"
+                },
+                "error": {
+                    "description": "Error is the dial error when OK is false.",
+                    "type": "string"
+                },
+                "latency": {
+                    "description": "Latency is how long the dial took.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/time.Duration"
+                        }
+                    ]
+                },
+                "ok": {
+                    "description": "OK reports whether the dial succeeded.",
+                    "type": "boolean"
+                }
+            }
         },
         "core.RequestMetric": {
             "type": "object",
@@ -1908,14 +2154,40 @@
             "type": "integer",
             "format": "int64",
             "enum": [
+                -9223372036854775808,
+                9223372036854775807,
                 1,
                 1000,
-                1000000
+                1000000,
+                1000000000,
+                60000000000,
+                3600000000000,
+                -9223372036854775808,
+                9223372036854775807,
+                1,
+                1000,
+                1000000,
+                1000000000,
+                60000000000,
+                3600000000000
             ],
             "x-enum-varnames": [
+                "minDuration",
+                "maxDuration",
                 "Nanosecond",
                 "Microsecond",
-                "Millisecond"
+                "Millisecond",
+                "Second",
+                "Minute",
+                "Hour",
+                "minDuration",
+                "maxDuration",
+                "Nanosecond",
+                "Microsecond",
+                "Millisecond",
+                "Second",
+                "Minute",
+                "Hour"
             ]
         }
     },
@@ -1947,6 +2219,10 @@
         {
             "description": "Recent proxied-request records",
             "name": "metrics"
+        },
+        {
+            "description": "Exit-IP check results (the public IP observed at each outbound's exit) and on-demand check triggers",
+            "name": "exit-checks"
         }
     ]
 }

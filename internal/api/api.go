@@ -12,11 +12,14 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/goose-network/goose/internal/config"
+	"github.com/goose-network/goose/internal/core"
+	"github.com/goose-network/goose/internal/exitip"
 	"github.com/goose-network/goose/internal/metrics"
 )
 
@@ -38,16 +41,32 @@ import (
 //	@tag.description	Dynamic outbound providers (subscription links, tunnel-based sources) that populate managed pools
 //	@tag.name		metrics
 //	@tag.description	Recent proxied-request records
+//	@tag.name		exit-checks
+//	@tag.description	Exit-IP check results (the public IP observed at each outbound's exit) and on-demand check triggers
 
 // maxBodyBytes caps the size of an admin-API request body to prevent memory caps the size of an admin-API request body to prevent memory
 // exhaustion from oversized POST/PUT payloads.
 const maxBodyBytes = 1 << 20 // 1 MiB
 
+// probeReporter supplies the latest reachability-probe verdicts for
+// access-filtered pool members (the router implements it).
+type probeReporter interface {
+	ChainProbeStatus() []core.ProbeStatus
+}
+
+// exitRunner runs exit-IP check rounds on demand (the exitip Manager
+// implements it).
+type exitRunner interface {
+	CheckNow()
+}
+
 // Server is the admin API server.
 type Server struct {
-	cfg *config.Store
-	ms  *metrics.Store
-	mux *http.ServeMux
+	cfg    *config.Store
+	ms     *metrics.Store
+	mux    *http.ServeMux
+	probes probeReporter
+	checks exitRunner
 }
 
 // New builds an API server bound to the config store and metrics store.
@@ -56,6 +75,14 @@ func New(cfg *config.Store, ms *metrics.Store) *Server {
 	s.routes()
 	return s
 }
+
+// SetProbeReporter wires the probe-status source (the router). Optional:
+// without it, GET /api/chains/probes reports an empty list.
+func (s *Server) SetProbeReporter(p probeReporter) { s.probes = p }
+
+// SetExitRunner wires the on-demand exit-check trigger (the exitip Manager).
+// Optional: without it, POST /api/exit-checks/run reports 503.
+func (s *Server) SetExitRunner(r exitRunner) { s.checks = r }
 
 // Handler returns the HTTP handler (for embedding in a custom server).
 func (s *Server) Handler() http.Handler { return s.mux }
@@ -69,10 +96,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/pools/", s.pools)
 	s.mux.HandleFunc("/api/chains", s.chains)
 	s.mux.HandleFunc("/api/chains/", s.chains)
+	s.mux.HandleFunc("/api/chains/probes", s.chainProbes)
 	s.mux.HandleFunc("/api/providers", s.providers)
 	s.mux.HandleFunc("/api/providers/", s.providers)
 	s.mux.HandleFunc("/api/metrics", s.metricsHandler)
 	s.mux.HandleFunc("/api/engine", s.engine)
+	s.mux.HandleFunc("/api/exit-checks", s.exitChecks)
+	s.mux.HandleFunc("/api/exit-checks/run", s.exitChecksRun)
 }
 
 // Auth wraps the handler with bearer-token auth if a token is configured.
@@ -182,13 +212,19 @@ func (s *Server) engine(w http.ResponseWriter, r *http.Request) {
 //	@Router       /api/engine [put]
 
 // validateEngine sanity-checks an engine config before persisting it, so
-// invalid values (e.g. an unknown stack type) are rejected at the API with a
-// 400 rather than failing later during reconciliation.
+// invalid values (e.g. an unknown stack type, or an unparseable exit-check
+// cron expression) are rejected at the API with a 400 rather than failing
+// later during reconciliation or silently disabling the scheduler.
 func validateEngine(e config.Engine) error {
 	switch e.Stack {
 	case "", "system", "gvisor":
 	default:
 		return errors.New("engine: stack must be one of system, gvisor")
+	}
+	if e.ExitChecks.Cron != "" {
+		if _, err := exitip.ParseCron(e.ExitChecks.Cron); err != nil {
+			return fmt.Errorf("engine: exit_checks.cron: %w", err)
+		}
 	}
 	return nil
 }
@@ -592,6 +628,87 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 // maxMetricsRows caps the number of metric rows a single API call can return.
 const maxMetricsRows = 10000
+
+// --- chain probes ---
+
+// listChainProbes godoc
+//
+//	@Summary      List reachability probes for access-filtered pool members
+//	@Description  Returns the latest auto-chain reachability verdict per probed outbound: whether the engine can dial the member's server directly and, when it cannot, whether an access-pool proxy can relay to it (and which one). Members whose server is unreachable both ways are dropped from routing; members reachable only via relay are routed through that relay (auto-built chain).
+//	@Tags         chains
+//	@Produce      json
+//	@Success      200 {array} core.ProbeStatus
+//	@Router       /api/chains/probes [get]
+func (s *Server) chainProbes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
+		return
+	}
+	if s.probes == nil {
+		writeJSON(w, []core.ProbeStatus{}, http.StatusOK)
+		return
+	}
+	writeJSON(w, s.probes.ChainProbeStatus(), http.StatusOK)
+}
+
+// --- exit checks ---
+
+// listExitChecks godoc
+//
+//	@Summary      List recent exit-IP check results
+//	@Description  Returns up to n recent exit-IP check records, newest first: for each checked outbound, the site it was asked, the public IP observed at the proxy's exit, latency, and time. Optionally filtered to one outbound. A proxy's connect address is not its exit address, and the exit can vary by site and over time — history makes both visible. Scheduling is configured on the engine resource (exit_checks.enabled / cron / interval_seconds / sites / timeout_seconds / concurrency).
+//	@Tags         exit-checks
+//	@Produce      json
+//	@Param        n query int false "Number of records to return (default 100, max 10000)" default(100) maximum(10000)
+//	@Param        outbound_id query string false "Only results for this outbound"
+//	@Success      200 {array} core.ExitCheck
+//	@Failure      401 {object} errResponse
+//	@Failure      500 {object} errResponse
+//	@Router       /api/exit-checks [get]
+func (s *Server) exitChecks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
+		return
+	}
+	n := 100
+	if v := r.URL.Query().Get("n"); v != "" {
+		if parsed, err := parseInt(v); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	if n > maxMetricsRows {
+		n = maxMetricsRows
+	}
+	out := r.URL.Query().Get("outbound_id")
+	rec, err := s.ms.RecentExitChecks(n, out)
+	if err != nil {
+		writeJSON(w, errResponse{err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, rec, http.StatusOK)
+}
+
+// runExitChecks godoc
+//
+//	@Summary      Trigger an exit-IP check round now
+//	@Description  Starts one exit-IP check round immediately (background); results appear in GET /api/exit-checks as they complete. Uses the engine's exit-check site list, timeout, and concurrency. Scheduling (cron/interval) is unaffected.
+//	@Tags         exit-checks
+//	@Success      202 {object} errResponse
+//	@Failure      401 {object} errResponse
+//	@Failure      503 {object} errResponse
+//	@Router       /api/exit-checks/run [post]
+func (s *Server) exitChecksRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
+		return
+	}
+	if s.checks == nil {
+		writeJSON(w, errResponse{"exit checks not wired"}, http.StatusServiceUnavailable)
+		return
+	}
+	s.checks.CheckNow()
+	writeJSON(w, errResponse{"exit-IP check round started"}, http.StatusAccepted)
+}
 
 func parseInt(s string) (int, error) {
 	var n int

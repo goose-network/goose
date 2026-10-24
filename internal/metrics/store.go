@@ -17,8 +17,9 @@ import (
 )
 
 var (
-	bucketRequests  = []byte("requests")
-	bucketOutbounds = []byte("outbounds")
+	bucketRequests   = []byte("requests")
+	bucketOutbounds  = []byte("outbounds")
+	bucketExitChecks = []byte("exitchecks")
 )
 
 // Store is the metrics store: a bbolt DB for durable per-request records
@@ -59,7 +60,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("metrics: open %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketRequests, bucketOutbounds} {
+		for _, b := range [][]byte{bucketRequests, bucketOutbounds, bucketExitChecks} {
 			if _, e := tx.CreateBucketIfNotExists(b); e != nil {
 				return e
 			}
@@ -239,6 +240,50 @@ func (s *Store) Recent(n int) ([]core.RequestMetric, error) {
 			var m core.RequestMetric
 			if err := json.Unmarshal(v, &m); err == nil {
 				out = append(out, m)
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// RecordExitCheck durably stores one exit-IP check result. Checks run at
+// human cadence (a round per cron tick), so a synchronous single-key write
+// is appropriate — unlike request metrics, there is no hot data path to
+// protect.
+func (s *Store) RecordExitCheck(c core.ExitCheck) error {
+	if s.closed.Load() {
+		return errors.New("metrics: store closed")
+	}
+	val, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	key := []byte(fmt.Sprintf("%d-%s", c.StartedAt.UnixNano(), c.ID))
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketExitChecks).Put(key, val)
+	})
+}
+
+// RecentExitChecks returns up to n exit-IP check records, newest first.
+// When outboundID is non-empty, only that outbound's records are returned.
+func (s *Store) RecentExitChecks(n int, outboundID string) ([]core.ExitCheck, error) {
+	if n < 1 {
+		n = 1
+	}
+	out := make([]core.ExitCheck, 0, n)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketExitChecks).Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			var ec core.ExitCheck
+			if err := json.Unmarshal(v, &ec); err == nil {
+				if outboundID != "" && ec.OutboundID != outboundID {
+					continue
+				}
+				out = append(out, ec)
+				if len(out) >= n {
+					return nil
+				}
 			}
 		}
 		return nil

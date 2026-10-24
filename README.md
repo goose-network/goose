@@ -65,6 +65,66 @@ curl --socks5-hostname 127.0.0.1:11080 https://api.ipify.org
 The admin API (`GET /api/pools`, `/api/outbounds`, ...) reports the live
 pool, including outbounds contributed by providers.
 
+### Auto-built proxy chains (access pools)
+
+Some pool members' servers are directly reachable from the local network;
+others are blocked by the local ISP and can only be used through an access
+(relay) proxy. A pool with an `access` filter handles this automatically:
+
+```json
+{
+  "pools": [
+    { "id": "access", "outbound_ids": ["front-door"], "selector": { "type": "random" } },
+    {
+      "id": "work",
+      "outbound_ids": ["proxy-a", "proxy-b", "proxy-c"],
+      "selector": { "type": "random" },
+      "access": { "access_pool_id": "access", "probe_interval_seconds": 300, "probe_timeout_seconds": 5 }
+    }
+  ]
+}
+```
+
+The engine probes every member of the work pool — dialing its server
+directly and, when that fails, through each access-pool candidate. Routing
+follows the verdicts: directly reachable members are dialed single-hop,
+members reachable only via the access proxy get it prepended as a relay hop
+(engine → access → member → target), and members unreachable both ways are
+dropped from the pool. Probes repeat on the interval and on every config
+change; verdicts are visible on `GET /api/chains/probes`. Fail-open: before
+the first probe round completes, all members are treated as reachable.
+
+### Exit-IP checks (cron)
+
+A proxy's connect address is not its exit address — the public IP at the
+proxy's exit can vary by target site and over time. The engine can check it
+per outbound, on a schedule, and record the history:
+
+```json
+{
+  "engine": {
+    "exit_checks": {
+      "enabled": true,
+      "cron": "*/15 * * * *",
+      "sites": ["https://ifconfig.me", "https://api.ipify.org"],
+      "timeout_seconds": 15,
+      "concurrency": 4
+    }
+  }
+}
+```
+
+Each round dials every outbound *through the outbound itself* (relay hop
+included) and asks one of the configured "what is my IP" sites, rotating
+round-robin across the list so large batches spread load instead of
+tripping one site's rate limits. Results are recorded per
+(outbound, site, exit IP, time) and served by `GET /api/exit-checks`
+(filter with `?outbound_id=`); `POST /api/exit-checks/run` triggers an
+extra round on demand. `interval_seconds` is the alternative to `cron`
+(cron wins when both are set). Zero value (the default) keeps the engine
+from making any unsolicited outbound requests. The web UI's Exit IP page
+drives all of this.
+
 ### Geph provider
 
 The bundled [geph5-go](../geph5-go) client is wired in as a provider too. It

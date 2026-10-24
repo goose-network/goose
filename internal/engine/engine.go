@@ -16,6 +16,7 @@ import (
 
 	"github.com/goose-network/goose/internal/api"
 	"github.com/goose-network/goose/internal/config"
+	"github.com/goose-network/goose/internal/exitip"
 	"github.com/goose-network/goose/internal/geo"
 	"github.com/goose-network/goose/internal/inbound"
 	"github.com/goose-network/goose/internal/metrics"
@@ -34,13 +35,14 @@ type listenerEntry struct {
 
 // Engine is the running goose engine.
 type Engine struct {
-	cfg       *config.Store
-	ms        *metrics.Store
-	geo       *geo.Manager
-	stack     stack.Stack
-	router    *router.Router
-	api       *api.Server
-	providers *provider.Manager
+	cfg        *config.Store
+	ms         *metrics.Store
+	geo        *geo.Manager
+	stack      stack.Stack
+	router     *router.Router
+	api        *api.Server
+	providers  *provider.Manager
+	exitChecks *exitip.Manager
 
 	mu        sync.Mutex
 	listeners map[string]*listenerEntry // keyed by inbound id
@@ -83,6 +85,10 @@ func New(cfg *config.Store) (*Engine, error) {
 		done:      make(chan struct{}),
 	}
 	e.api = api.New(cfg, ms)
+	e.api.SetProbeReporter(rtr)
+	e.exitChecks = exitip.NewManager(ms, rtr)
+	e.exitChecks.Reconfigure(engCfg.ExitChecks)
+	e.api.SetExitRunner(e.exitChecks)
 
 	// initial reconcile of listeners
 	e.reconcile()
@@ -116,6 +122,7 @@ func (e *Engine) watch(ch <-chan uint64) {
 				return
 			}
 			e.router.Rebuild()
+			e.exitChecks.Reconfigure(e.cfg.Engine().ExitChecks)
 			e.reconcile()
 		case <-e.done:
 			return
@@ -271,6 +278,8 @@ func (e *Engine) Close() error {
 		if e.providers != nil {
 			_ = e.providers.Close()
 		}
+		e.exitChecks.Close()
+		e.router.Close()
 		_ = e.ms.Close()
 		_ = e.stack.Close()
 	})

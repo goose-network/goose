@@ -124,15 +124,58 @@ type Recorder interface {
 
 // RequestMetric is the persisted record of one proxied request.
 type RequestMetric struct {
-	ID         string    `json:"id"`
-	InboundID  string    `json:"inboundID"`
-	User       string    `json:"user"`
-	Network    Network   `json:"network"`
-	Target     string    `json:"target"`
-	Chain      []string  `json:"chain"`
-	Success    bool      `json:"success"`
-	Error      string    `json:"error"`
+	ID         string        `json:"id"`
+	InboundID  string        `json:"inboundID"`
+	User       string        `json:"user"`
+	Network    Network       `json:"network"`
+	Target     string        `json:"target"`
+	Chain      []string      `json:"chain"`
+	Success    bool          `json:"success"`
+	Error      string        `json:"error"`
 	Latency    time.Duration `json:"latency"`
-	StartedAt  time.Time    `json:"startedAt"`
-	FinishedAt time.Time    `json:"finishedAt"`
+	StartedAt  time.Time     `json:"startedAt"`
+	FinishedAt time.Time     `json:"finishedAt"`
+}
+
+// ProbeVerdict is the outcome of one reachability probe dial.
+type ProbeVerdict struct {
+	// OK reports whether the dial succeeded.
+	OK bool `json:"ok"`
+	// Latency is how long the dial took.
+	Latency time.Duration `json:"latency"`
+	// Error is the dial error when OK is false.
+	Error string `json:"error"`
+	// At is when the probe ran.
+	At time.Time `json:"at"`
+}
+
+// ProbeStatus is the engine's latest reachability verdicts for one outbound
+// of an auto-chained pool (a pool with an access filter). Direct is the
+// probe from the local network to the outbound's server; Relay is the probe
+// through the pool's access proxy, meaningful only when Direct failed.
+// RelayVia is the access outbound that reached the server.
+type ProbeStatus struct {
+	OutboundID string       `json:"outboundID"`
+	Address    string       `json:"address"`
+	PoolID     string       `json:"poolID"`
+	Direct     ProbeVerdict `json:"direct"`
+	Relay      ProbeVerdict `json:"relay"`
+	RelayVia   string       `json:"relayVia"`
+}
+
+// ExitCheck is the persisted record of one exit-IP check: the public IP
+// observed when the engine dialed an exit-IP site through one outbound. A
+// proxy's connect address is not its exit address, and the exit can vary by
+// target site and over time, so results are recorded per (outbound, site).
+type ExitCheck struct {
+	ID         string `json:"id"`
+	OutboundID string `json:"outboundID"`
+	// Site is the host of the check site that was asked (e.g.
+	// "ifconfig.me").
+	Site      string        `json:"site"`
+	ExitIP    string        `json:"exitIP"`
+	Success   bool          `json:"success"`
+	Error     string        `json:"error"`
+	Latency   time.Duration `json:"latency"`
+	StartedAt time.Time     `json:"startedAt"`
 }
