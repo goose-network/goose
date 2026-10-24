@@ -6,6 +6,7 @@
 package config
 
 import (
+	"os"
 	"sync"
 	"time"
 )
@@ -251,8 +252,17 @@ type Store struct {
 
 // NewStore returns an empty store with sensible defaults.
 func NewStore() *Store {
+	// GOOSE_API_LISTEN overrides the default admin API address for
+	// containerized runs: the built-in 127.0.0.1 default binds the
+	// container's own loopback, unreachable through a published port.
+	// An explicit config file still wins — loadConfig applies it after
+	// NewStore and replaces the engine config wholesale.
+	listen := "127.0.0.1:9090"
+	if v := os.Getenv("GOOSE_API_LISTEN"); v != "" {
+		listen = v
+	}
 	return &Store{
-		engine:           Engine{Stack: "system", API: APIConfig{Listen: "127.0.0.1:9090"}, DB: "goose.db"},
+		engine:           Engine{Stack: "system", API: APIConfig{Listen: listen}, DB: "goose.db"},
 		inbounds:         map[string]*Inbound{},
 		outbounds:        map[string]*OutboundSpec{},
 		pools:            map[string]*Pool{},

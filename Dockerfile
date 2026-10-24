@@ -72,9 +72,18 @@ COPY --from=build --chown=nonroot:nonroot /out/state/ /data/
 WORKDIR /data
 VOLUME /data
 
-# Admin API port; the engine default binds 127.0.0.1:9090 (reachable via
-# --network=container or a config that binds 0.0.0.0). Inbound proxy ports
-# are config-driven — publish them with -p as needed.
+# Container default: bind the admin API on all interfaces so the
+# published port (-p 9090:9090) can actually reach it; the built-in
+# default is the container's own loopback, which nothing outside the
+# netns can talk to. Set -e GOOSE_API_LISTEN=127.0.0.1:9090 to restore
+# the loopback bind, or pass a -config file whose engine.api.listen
+# overrides both (config always wins over the env default).
+ENV GOOSE_API_LISTEN=0.0.0.0:9090
+
+# Admin API port; the engine binds 0.0.0.0:9090 by default here (see
+# GOOSE_API_LISTEN above) — anyone who can reach the published port can
+# drive the admin API unless a token is set in the engine config.
+# Inbound proxy ports are config-driven — publish them with -p as needed.
 EXPOSE 9090
 
 ENTRYPOINT ["/usr/local/bin/goose"]

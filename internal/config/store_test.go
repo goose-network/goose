@@ -63,3 +63,13 @@ func TestStoreEngineDefaults(t *testing.T) {
 	assert.Equal(t, "system", e.Stack)
 	assert.NotEmpty(t, e.API.Listen)
 }
+
+func TestStoreEngineDefaultsAPIListenEnv(t *testing.T) {
+	// Unset: the documented default is loopback.
+	t.Setenv("GOOSE_API_LISTEN", "")
+	assert.Equal(t, "127.0.0.1:9090", NewStore().Engine().API.Listen)
+
+	// Set: overrides the default (containerized runs bind 0.0.0.0).
+	t.Setenv("GOOSE_API_LISTEN", "0.0.0.0:9090")
+	assert.Equal(t, "0.0.0.0:9090", NewStore().Engine().API.Listen)
+}

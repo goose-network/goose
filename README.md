@@ -33,6 +33,15 @@ The image is distroless (static, nonroot). With no `-config` argument the
 engine starts with empty defaults and is configured through the admin API.
 State (the metrics bbolt DB) lives in `/data`.
 
+The image sets `GOOSE_API_LISTEN=0.0.0.0:9090` so the published port
+reaches the admin API without any config — without it the engine's
+loopback default would bind the container's own 127.0.0.1 and the
+published port would get connection-reset (502 behind the goose-web
+nginx proxy). Run with `-e GOOSE_API_LISTEN=127.0.0.1:9090` or a
+`-config` file to restore a loopback bind. Anyone who can reach the
+published port can drive the admin API unless a token is set in the
+engine config.
+
 Only the admin API port is declaratively exposed; inbound proxy ports are
 config-driven — publish them with `-p` as they appear in your config.
 
