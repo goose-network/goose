@@ -226,6 +226,32 @@ pool named `pool_id`, bumping the config version so the router rebuilds.
 Stale outbounds (present last poll, absent this poll) are removed. On
 `Outbounds` error the existing pool is kept (no drain, no crash).
 
+A provider spec may also set `upstream_proxy`, routing the provider's own
+URL fetches (the subscription download, the server-list fetch, ...) through
+an engine-managed route instead of the engine host's local network:
+`""`/`"direct"`, `"outbound:<id>"` (one specific proxy server), `"pool:<id>"`
+(the pool's selector with member failover, access filter included), or
+`"access"` (dial direct first, then fall back to the access pool of the
+pools this provider feeds). The router resolves the reference against live
+config at dial time and hands the provider a dialer injected into its
+config map under `pkg/plugin.UpstreamDialerKey`; URL-fetching plugins wire
+it as their HTTP transport's DialContext. The same
+selection/failover/access-filter machinery that serves user traffic thereby
+also serves provider fetches, so a URL blocked on the host network can flow
+through a reachable proxy — and edits to pools apply to the next fetch
+without restarting the provider, while editing the field restarts it.
+
+When the config store holds no providers at startup, the engine seeds the
+**default provider a plugin declared** through the plugin contract
+(`RegisterDefaultProvider`; the registry panics when two plugins declare
+one). This keeps the engine generic — it never learns *which* plugin is the
+default — while a zero-config deployment (the docker image run with no
+config file) still comes up with a working provider. Seeding is an
+entrypoint concern (`cmd/goose`), not `engine.New`: libraries and tests
+build engines directly and must not spontaneously start live tunnels. An
+explicitly configured provider always wins, and `GOOSE_NO_DEFAULT_PROVIDER=1`
+opts out entirely.
+
 See the [Psiphon provider plugin](../psiphon) for a real example: it starts
 a tunnel-core tunnel with the background remote-server-list fetcher enabled
 (so the server list auto-updates like the Psiphon Windows client) and

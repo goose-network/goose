@@ -97,11 +97,14 @@ func New(cfg *config.Store) (*Engine, error) {
 	// server list and merges outbounds into a managed pool, bumping the config
 	// version so the router rebuilds. Done after the initial reconcile so the
 	// first provider poll triggers a rebuild with the router already wired.
-	e.providers = provider.New(cfg)
+	// Manager.Start itself is failure-tolerant: a provider that cannot start
+	// (unknown plugin, bad config) is logged and skipped, not fatal.
+	//
+	// The router is the providers' upstream source: a spec whose
+	// upstream_proxy routes its fetches through an engine outbound/pool gets
+	// a dialer resolved against live config (see internal/router/upstream.go).
+	e.providers = provider.New(cfg, rtr)
 	if err := e.providers.Start(); err != nil {
-		// A failing provider shouldn't fatal the whole engine; the static
-		// config (inbounds, pools, chains) can still serve traffic. Log and
-		// continue.
 		fmt.Printf("engine: provider start: %v\n", err)
 	}
 

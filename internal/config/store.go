@@ -238,8 +238,34 @@ type ProviderSpec struct {
 	ID       string `json:"id"`
 	Provider string `json:"provider"` // plugin name, e.g. "psiphon"
 	// PoolIDs are the managed pools to populate; empty means the default pool.
-	PoolIDs []string       `json:"pool_ids,omitempty"`
-	Config  map[string]any `json:"config"`
+	PoolIDs []string `json:"pool_ids,omitempty"`
+	// UpstreamProxy routes the provider's own URL fetches (subscription
+	// download, server-list fetch, ...) through an engine-managed route
+	// instead of dialing directly from the engine host. Empty (the default)
+	// keeps direct fetches. The reference is one of:
+	//
+	//   - "outbound:<id>":  one specific proxy server (a configured outbound);
+	//     a bare id is also accepted — resolved as a pool when a pool with
+	//     that id exists, else as an outbound (same precedence as chain
+	//     layers), so "pool:<id>" and "outbound:<id>" pin the meaning
+	//   - "pool:<id>":      pick an outbound from a pool (its selector, with
+	//     failover across members; the pool's access filter applies, so
+	//     members the local network cannot reach are dialed through the
+	//     pool's access proxies)
+	//   - "access":         dial the fetch target directly first, and fall
+	//     back to the access pool of the pools this provider feeds (the
+	//     same direct-vs-relay testing the access filter does for pool
+	//     members) when the local network cannot reach it
+	//   - "direct":         always dial directly (explicit no-op form)
+	//
+	// The engine resolves the reference at dial time against live config, so
+	// pool membership and access-pool changes apply without restarting the
+	// provider; editing the reference itself restarts it. The resolved dialer
+	// is injected into the provider's config map for plugins that support
+	// routed fetches (see pkg/plugin.UpstreamDialer).
+	UpstreamProxy string `json:"upstream_proxy"`
+	// Config is the plugin-specific provider configuration.
+	Config map[string]any `json:"config"`
 }
 
 // UnmarshalJSON accepts both the plural `pool_ids` array and the legacy
@@ -535,6 +561,24 @@ func (s *Store) DeleteProvider(id string) bool {
 		}
 		s.rebuildProviderPoolLocked(poolID)
 	}
+	s.bumpLocked()
+	return true
+}
+
+// SeedDefaultProvider adds spec as the sole provider of a store that has no
+// providers configured — the fresh-deployment form of SetProvider. It is the
+// mechanism behind the default-provider seeding a plugin declares through the
+// registry (pkg/plugin.RegisterDefaultProvider) and the entrypoint seeds on
+// a boot with no providers; the store itself stays plugin-agnostic. A store
+// that already configures any provider is left alone — an explicit provider
+// list opts out of the default. Returns whether the spec was added.
+func (s *Store) SeedDefaultProvider(spec *ProviderSpec) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.providers) > 0 {
+		return false
+	}
+	s.providers[spec.ID] = spec
 	s.bumpLocked()
 	return true
 }

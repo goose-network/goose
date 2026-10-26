@@ -1973,6 +1973,7 @@
             "type": "object",
             "properties": {
                 "config": {
+                    "description": "Config is the plugin-specific provider configuration.",
                     "type": "object",
                     "additionalProperties": {}
                 },
@@ -1988,6 +1989,10 @@
                 },
                 "provider": {
                     "description": "plugin name, e.g. \"psiphon\"",
+                    "type": "string"
+                },
+                "upstream_proxy": {
+                    "description": "UpstreamProxy routes the provider's own URL fetches (subscription\ndownload, server-list fetch, ...) through an engine-managed route\ninstead of dialing directly from the engine host. Empty (the default)\nkeeps direct fetches. The reference is one of:\n\n  - \"outbound:\u003cid\u003e\":  one specific proxy server (a configured outbound);\n    a bare id is also accepted — resolved as a pool when a pool with\n    that id exists, else as an outbound (same precedence as chain\n    layers), so \"pool:\u003cid\u003e\" and \"outbound:\u003cid\u003e\" pin the meaning\n  - \"pool:\u003cid\u003e\":      pick an outbound from a pool (its selector, with\n    failover across members; the pool's access filter applies, so\n    members the local network cannot reach are dialed through the\n    pool's access proxies)\n  - \"access\":         dial the fetch target directly first, and fall\n    back to the access pool of the pools this provider feeds (the\n    same direct-vs-relay testing the access filter does for pool\n    members) when the local network cannot reach it\n  - \"direct\":         always dial directly (explicit no-op form)\n\nThe engine resolves the reference at dial time against live config, so\npool membership and access-pool changes apply without restarting the\nprovider; editing the reference itself restarts it. The resolved dialer\nis injected into the provider's config map for plugins that support\nrouted fetches (see pkg/plugin.UpstreamDialer).",
                     "type": "string"
                 }
             }

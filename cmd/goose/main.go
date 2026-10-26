@@ -15,6 +15,7 @@ import (
 	"github.com/goose-network/goose/internal/config"
 	"github.com/goose-network/goose/internal/engine"
 	"github.com/goose-network/goose/internal/plugin"
+	"github.com/goose-network/goose/internal/provider"
 )
 
 func main() {
@@ -28,6 +29,14 @@ func main() {
 		if err := loadConfig(store, cfgPath); err != nil {
 			log.Fatalf("goose: load config %s: %v", cfgPath, err)
 		}
+	}
+	// A fresh deployment (no providers in the loaded config — the docker
+	// image's no-config start) seeds the provider a plugin declared through
+	// the registry, so the engine is routable out of the box. Which plugin
+	// that is lives entirely in the plugin set; goose itself stays generic
+	// (GOOSE_NO_DEFAULT_PROVIDER=1 disables seeding).
+	if provider.SeedDefault(store) {
+		log.Printf("goose: no providers configured; seeded the plugin-declared default provider (set GOOSE_NO_DEFAULT_PROVIDER=1 to disable)")
 	}
 
 	eng, err := engine.New(store)

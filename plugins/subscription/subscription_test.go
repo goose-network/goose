@@ -3,13 +3,31 @@ package subscription
 import (
 	"context"
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	pub "github.com/goose-network/goose/pkg/plugin"
 )
+
+// recordingDialer is a fake UpstreamDialer: it records every dial target and
+// then connects for real, so a routed fetch completes while proving the
+// fetch's TCP dial went through the injected route.
+type recordingDialer struct {
+	mu    sync.Mutex
+	addrs []string
+}
+
+func (d *recordingDialer) DialUpstream(ctx context.Context, network, address string) (net.Conn, error) {
+	d.mu.Lock()
+	d.addrs = append(d.addrs, address)
+	d.mu.Unlock()
+	var nd net.Dialer
+	return nd.DialContext(ctx, network, address)
+}
 
 // TestParsePlainList covers the one-URI-per-line body form.
 func TestParsePlainList(t *testing.T) {
@@ -154,6 +172,46 @@ func TestOutboundsSurfacesFetchError(t *testing.T) {
 	}
 	if _, err := p.Outbounds(context.Background()); err == nil {
 		t.Fatal("a 500 subscription should surface an error")
+	}
+}
+
+// TestOutboundsDialsThroughUpstream asserts the engine-injected upstream
+// dialer carries the fetch: with cfg[pub.UpstreamDialerKey] set (the engine's
+// wiring for spec.upstream_proxy), the download's TCP dial goes through that
+// dialer — and the fetch still completes over it.
+func TestOutboundsDialsThroughUpstream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("socks5://u:p@127.0.0.1:9999\n"))
+	}))
+	defer srv.Close()
+	// The fetch target the dialer should see: the subscription server's
+	// host:port, stripped of the http:// scheme.
+	target := strings.TrimPrefix(srv.URL, "http://")
+
+	d := &recordingDialer{}
+	p, err := New(map[string]any{
+		"url":                 srv.URL,
+		pub.UpstreamDialerKey: d,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	out, err := p.Outbounds(context.Background())
+	if err != nil {
+		t.Fatalf("Outbounds: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("want 1 outbound, got %d", len(out))
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.addrs) == 0 {
+		t.Fatal("fetch dialed directly; the injected upstream dialer was bypassed")
+	}
+	if d.addrs[0] != target {
+		t.Errorf("dial target = %q, want %q (the subscription server)", d.addrs[0], target)
 	}
 }
 

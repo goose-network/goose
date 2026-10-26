@@ -29,6 +29,15 @@
 // 1.2.3.4:1080") so they are stable across refreshes: reordering the list
 // moves pool members instead of recreating them.
 //
+// # Upstream routing
+//
+// When the provider spec sets an upstream_proxy (see config.ProviderSpec),
+// the engine injects a routed dialer into this provider's config map (see
+// pkg/plugin.AsUpstreamDialer). The subscription download then dials through
+// the engine route the spec names — a specific outbound, a pool, or the
+// access pool — instead of the engine host's local network, so blocked
+// subscription URLs (GFW-style) can be fetched through a working proxy.
+//
 // # Config
 //
 // The provider config is a JSON object:
@@ -78,6 +87,10 @@ type Provider struct {
 // New builds a subscription provider from config:
 //
 //	{"url":"https://...","prefix":"sub"}
+//
+// When the engine injected an upstream dialer (the spec's upstream_proxy is
+// set), the provider's HTTP transport dials through it; otherwise it uses
+// the default transport (direct fetches).
 func New(cfg map[string]any) (pub.Provider, error) {
 	u, _ := cfg["url"].(string)
 	if u == "" {
@@ -87,10 +100,22 @@ func New(cfg map[string]any) (pub.Provider, error) {
 	if prefix == "" {
 		prefix = defaultPrefix
 	}
+	client := &http.Client{Timeout: fetchTimeout}
+	if d := pub.AsUpstreamDialer(cfg); d != nil {
+		// Route the fetch's TCP dials through the engine-resolved upstream.
+		// Clone the default transport so its timeouts and HTTP/2 negotiation
+		// apply over the tunnel, but drop its ambient proxy support
+		// (HTTP_PROXY et al.): the upstream dialer is the route, and layering
+		// an env proxy on top of it would double-proxy.
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DialContext = d.DialUpstream
+		client.Transport = transport
+	}
 	return &Provider{
 		url:    u,
 		prefix: prefix,
-		client: &http.Client{Timeout: fetchTimeout},
+		client: client,
 	}, nil
 }
 

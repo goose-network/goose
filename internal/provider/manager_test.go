@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -76,7 +78,7 @@ func TestManagerMergesProviderOutboundsIntoPool(t *testing.T) {
 		{ID: "fake-b", Protocol: "socks5", Config: map[string]any{"address": "127.0.0.1:2"}},
 	})
 
-	mgr := New(store)
+	mgr := New(store, nil)
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -140,7 +142,7 @@ func TestManagerDefaultsToDefaultPool(t *testing.T) {
 		{ID: "def-a", Protocol: "socks5", Config: map[string]any{"address": "127.0.0.1:21"}},
 	})
 
-	mgr := New(store)
+	mgr := New(store, nil)
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -176,7 +178,7 @@ func TestManagerKeepsPoolOnProviderError(t *testing.T) {
 		Config:   map[string]any{},
 	})
 
-	mgr := New(store)
+	mgr := New(store, nil)
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -212,7 +214,7 @@ func (errSentinel) Error() string { return "fake provider error" }
 func TestManagerReconcilesOnConfigChange(t *testing.T) {
 	store := config.NewStore()
 
-	mgr := New(store)
+	mgr := New(store, nil)
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -270,6 +272,113 @@ func TestManagerReconcilesOnConfigChange(t *testing.T) {
 
 	if _, ok := store.Outbound("late-b"); ok {
 		t.Fatal("managed outbound late-b should be gone after provider delete")
+	}
+}
+
+// stubUpstreamDialer is handed to factories by fakeUpstreamSource; no test
+// here actually dials through it, so it refuses loudly.
+type stubUpstreamDialer struct{}
+
+func (stubUpstreamDialer) DialUpstream(context.Context, string, string) (net.Conn, error) {
+	return nil, errors.New("provider manager test: unexpected upstream dial")
+}
+
+// fakeUpstreamSource records the specs it resolved dialers for.
+type fakeUpstreamSource struct {
+	mu    sync.Mutex
+	specs []*config.ProviderSpec
+}
+
+func (f *fakeUpstreamSource) UpstreamDialer(spec *config.ProviderSpec) pub.UpstreamDialer {
+	f.mu.Lock()
+	f.specs = append(f.specs, spec)
+	f.mu.Unlock()
+	return stubUpstreamDialer{}
+}
+
+// TestManagerInjectsUpstreamDialer verifies the upstream_proxy wiring: the
+// manager asks the upstream source for a dialer and passes the factory a
+// config copy carrying it under the reserved key — without polluting the
+// spec's shared config map (which providerChanged compares and the store
+// hands out to every reader).
+func TestManagerInjectsUpstreamDialer(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		gotCfgs []map[string]any
+	)
+	// The registry panics on duplicate names, so each test registers a
+	// unique one.
+	pub.RegisterProvider("fake-upstream-inject-test", func(cfg map[string]any) (pub.Provider, error) {
+		mu.Lock()
+		gotCfgs = append(gotCfgs, cfg)
+		mu.Unlock()
+		return &fakeProvider{name: "fake-upstream-inject-test", watch: make(chan struct{}, 1)}, nil
+	})
+
+	store := config.NewStore()
+	spec := &config.ProviderSpec{
+		ID:            "p1",
+		Provider:      "fake-upstream-inject-test",
+		UpstreamProxy: "pool:relays",
+		Config:        map[string]any{"url": "https://example.com/sub"},
+	}
+	store.SetProvider(spec)
+
+	up := &fakeUpstreamSource{}
+	mgr := New(store, up)
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Close()
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(gotCfgs) == 1
+	}, 2*time.Second, "factory instantiation with injected config")
+
+	mu.Lock()
+	cfg := gotCfgs[0]
+	mu.Unlock()
+
+	if _, ok := cfg[pub.UpstreamDialerKey].(pub.UpstreamDialer); !ok {
+		t.Fatalf("factory config lacks the upstream dialer under %q: %v", pub.UpstreamDialerKey, cfg)
+	}
+	if cfg["url"] != "https://example.com/sub" {
+		t.Errorf("plugin's own config keys lost: %v", cfg)
+	}
+	if _, polluted := spec.Config[pub.UpstreamDialerKey]; polluted {
+		t.Fatal("the spec's shared config map must not gain the dialer key")
+	}
+
+	up.mu.Lock()
+	resolved := len(up.specs)
+	up.mu.Unlock()
+	if resolved != 1 {
+		t.Fatalf("upstream source resolved %d specs, want 1", resolved)
+	}
+}
+
+// TestProviderChangedOnUpstreamProxyEdit: an upstream_proxy edit counts as a
+// behavior change, so the watch loop restarts the provider and the factory
+// sees a config carrying the newly resolved dialer.
+func TestProviderChangedOnUpstreamProxyEdit(t *testing.T) {
+	spec := func(upstream string) *config.ProviderSpec {
+		return &config.ProviderSpec{
+			ID:            "p",
+			Provider:      "sub",
+			UpstreamProxy: upstream,
+			Config:        map[string]any{"url": "https://example.com/sub"},
+		}
+	}
+	if providerChanged(spec(""), spec("")) {
+		t.Fatal("identical specs should not count as changed")
+	}
+	if !providerChanged(spec(""), spec("access")) {
+		t.Fatal("adding upstream_proxy must count as changed")
+	}
+	if !providerChanged(spec("outbound:a"), spec("outbound:b")) {
+		t.Fatal("changing the upstream_proxy route must count as changed")
 	}
 }
 

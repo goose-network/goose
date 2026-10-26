@@ -26,6 +26,9 @@
 package plugin
 
 import (
+	"context"
+	"net"
+
 	api "github.com/goose-network/goose-plugin-api"
 )
 
@@ -42,8 +45,62 @@ type OutboundConfig = api.OutboundConfig
 // Provider is a dynamic source of outbound configs.
 type Provider = api.Provider
 
+// UpstreamDialer dials a fetch target through the upstream proxy configured on
+// a provider spec (config.ProviderSpec.UpstreamProxy — a specific outbound, a
+// pool, or an access-pool fallback). The engine resolves the reference
+// against live config and injects the dialer into the provider's config map
+// under the reserved "_upstream_dialer" key before instantiating the plugin;
+// URL-fetching providers type-assert it out and wire it as their HTTP
+// transport's DialContext so their downloads honor the route. The key is
+// absent (or the assertion fails) when no upstream proxy is configured —
+// fetch directly in that case.
+//
+// The returned connection is a tunnel to address: the upstream's proxy
+// handshake has already been performed, and the target protocol (TLS, HTTP,
+// ...) runs over it directly.
+//
+// This contract lives in the goose module for now; it is expected to graduate
+// to github.com/goose-network/goose-plugin-api (alongside Dialer) once
+// external provider plugins adopt routed fetches.
+type UpstreamDialer interface {
+	// DialUpstream dials address (host:port) through the provider's
+	// configured upstream proxy. network is "tcp" or "udp".
+	DialUpstream(ctx context.Context, network, address string) (net.Conn, error)
+}
+
 // ProviderFactory builds a Provider from a plugin-specific config map.
 type ProviderFactory = api.ProviderFactory
+
+// DefaultProvider is re-exported from the api module: a provider plugin's
+// declaration of the zero-config default the engine seeds on a fresh
+// deployment (a config store with no providers). See the api module's docs
+// for the declaration contract.
+type DefaultProvider = api.DefaultProvider
+
+// RegisterDefaultProvider declares this plugin as the fresh-deployment
+// default provider. Intended for init(); panics when another plugin already
+// declared a default.
+func RegisterDefaultProvider(dp DefaultProvider) { api.RegisterDefaultProvider(dp) }
+
+// LookupDefaultProvider returns the declared fresh-deployment default
+// provider, or false when no plugin declared one.
+func LookupDefaultProvider() (DefaultProvider, bool) { return api.LookupDefaultProvider() }
+
+// UpstreamDialerKey is the reserved provider config-map key the engine uses
+// to inject an UpstreamDialer (config.ProviderSpec.UpstreamProxy) into a
+// provider before instantiation. Plugin configs must not use the
+// "_upstream_dialer" name for their own fields.
+const UpstreamDialerKey = "_upstream_dialer"
+
+// AsUpstreamDialer extracts the engine-injected upstream dialer from a
+// provider config map, or nil when no upstream proxy is configured.
+func AsUpstreamDialer(cfg map[string]any) UpstreamDialer {
+	if cfg == nil {
+		return nil
+	}
+	d, _ := cfg[UpstreamDialerKey].(UpstreamDialer)
+	return d
+}
 
 // Dialer is the minimal dial capability a plugin needs from the engine.
 type Dialer = api.Dialer

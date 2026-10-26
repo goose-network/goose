@@ -80,6 +80,11 @@ VOLUME /data
 # overrides both (config always wins over the env default).
 ENV GOOSE_API_LISTEN=0.0.0.0:9090
 
+# Fresh deployments (no -config providers) seed the plugin-declared default
+# provider — the zero-config psiphon plugin, when linked into the build — so
+# the engine is routable and the admin UI shows a provider out of the box.
+# Run with -e GOOSE_NO_DEFAULT_PROVIDER=1 for a fully manual start.
+
 # Admin API port; the engine binds 0.0.0.0:9090 by default here (see
 # GOOSE_API_LISTEN above) — anyone who can reach the published port can
 # drive the admin API unless a token is set in the engine config.

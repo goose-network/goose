@@ -33,6 +33,18 @@ The image is distroless (static, nonroot). With no `-config` argument the
 engine starts with empty defaults and is configured through the admin API.
 State (the metrics bbolt DB) lives in `/data`.
 
+A fresh deployment — no `-config`, and nothing yet configured through the
+admin API — seeds the **plugin-declared default provider**: the zero-config
+Psiphon plugin declares itself the default, so the engine starts it
+automatically and its tunnels begin filling the `default` pool with no
+configuration at all. The web UI (and `GET /api/providers`) shows the
+provider immediately instead of an empty list. The behavior is generic
+engine code, not Psiphon-specific: a plugin declares itself via
+`plugin.RegisterDefaultProvider`, and the engine seeds whatever was
+declared whenever its config store holds no providers — seeding happens
+once at startup and never overrides an explicit provider list. Run with
+`-e GOOSE_NO_DEFAULT_PROVIDER=1` for a fully manual start.
+
 The image sets `GOOSE_API_LISTEN=0.0.0.0:9090` so the published port
 reaches the admin API without any config — without it the engine's
 loopback default would bind the container's own 127.0.0.1 and the
@@ -107,6 +119,47 @@ provider embeds the production Psiphon network parameters (channel, sponsor,
 remote-server-list URLs and signing keys, extracted from the official
 client) and fetches the server list itself — see
 [the plugin README](../psiphon/README.md).
+
+### Routed provider fetches (`upstream_proxy`)
+
+A provider's own URL fetches — the subscription download, the Psiphon
+server-list fetch, ... — dial from the engine host's local network by
+default. Set the spec-level `upstream_proxy` field to route them through
+the engine instead, so a subscription URL the host cannot reach directly
+still resolves through a working proxy:
+
+```json
+"providers": [
+  {
+    "id": "blocked-sub",
+    "provider": "subscription",
+    "upstream_proxy": "pool:relays",
+    "config": { "url": "https://example.com/sub" }
+  }
+]
+```
+
+The reference forms mirror the rest of the engine's reference syntax:
+
+| Route | Meaning |
+|---|---|
+| `""` / `"direct"` | dial the fetch target directly (the default) |
+| `"outbound:<id>"` | one specific proxy server |
+| `"pool:<id>"` | a pool: its selector picks a member, with failover across members; the pool's access filter applies |
+| `"access"` | dial direct first, then fall back to the access pool of the pools this provider feeds |
+| bare id | a pool with that id when one exists, else an outbound (same precedence as chain layers) |
+
+References resolve at dial time against live config — a pool edit applies to
+the next fetch without restarting the provider, while editing the field
+itself restarts it. The resolved dialer is injected into the provider's
+config map for plugins that support routed fetches (the subscription plugin
+does; see `pkg/plugin.UpstreamDialer`).
+
+Note the name collision with the Psiphon plugin's *config-level*
+`upstream_proxy` (a SOCKS URL its tunnels dial through, in the example
+above): that one lives inside the provider's `config` object and is handled
+by the plugin itself. The fetch-routing field described here is a sibling of
+`provider`/`pool_ids` on the spec.
 
 Then route through it:
 

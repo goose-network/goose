@@ -22,8 +22,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 pins=(
-  github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20260923221657-7ba364a3ef3c
-  github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20261026035124-19d8fa59172d
+  github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20261026084630-4cbc6f2e67ab
+  github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20261026084644-4502c345260f
   github.com/Psiphon-Labs/psiphon-tunnel-core=github.com/goose-network/psiphon-tunnel-core@v0.0.0-20260923221754-213987d32b71
   github.com/goose-network/goose-plugin-mihomo=github.com/goose-network/goose-plugin-mihomo@v0.0.0-20261015113701-b4a0a13af363
   github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261026061616-a174fc95b10f

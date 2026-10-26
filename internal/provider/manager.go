@@ -36,26 +36,39 @@ const pollInterval = 2 * time.Minute
 type Manager struct {
 	cfg *config.Store
 
+	// upstream resolves a provider spec's upstream_proxy reference into a
+	// dialer the manager injects into the provider's config (see upstream.go).
+	// The engine wires the router in; tests can stand in or omit it.
+	upstream upstreamSource
+
 	cancel  context.CancelFunc
 	mu      sync.Mutex
 	running []specCancel // running provider goroutines + the specs they came from
 }
 
-// New constructs a Manager. It does not start polling; call Start.
-func New(cfg *config.Store) *Manager {
-	return &Manager{cfg: cfg}
+// New constructs a Manager. The upstream source (the router, in the engine)
+// supplies fetch dialers for providers whose spec routes fetches through an
+// upstream proxy; it may be nil when nothing needs resolving (the dialer is
+// then simply never injected). It does not start polling; call Start.
+func New(cfg *config.Store, upstream upstreamSource) *Manager {
+	return &Manager{cfg: cfg, upstream: upstream}
 }
 
 // Start instantiates and begins polling every provider currently in the config
 // store, and subscribes to the config store so providers added or removed
 // through the admin API are started/stopped without an engine restart.
+//
+// A provider that fails to start (unknown plugin, bad config) is logged and
+// skipped rather than aborting: the remaining providers keep serving, the
+// watch/reconcile loop still runs (so fixing the spec through the admin API
+// starts it live), and a restart of the engine retries it.
 func (m *Manager) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
 	for _, spec := range m.cfg.Providers() {
 		if err := m.startOne(ctx, spec); err != nil {
-			return fmt.Errorf("provider %s: %w", spec.ID, err)
+			fmt.Printf("provider: start %s: %v\n", spec.ID, err)
 		}
 	}
 
@@ -130,9 +143,14 @@ type specCancel struct {
 
 // providerChanged reports whether a ProviderSpec's behavior-relevant fields
 // differ. The spec pointer itself is replaced by the store on every
-// SetProvider, so compare by value.
+// SetProvider, so compare by value. UpstreamProxy is compared too: a changed
+// fetch route re-instantiates the provider so its config gets the newly
+// resolved dialer.
 func providerChanged(a, b *config.ProviderSpec) bool {
 	if a.ID != b.ID || a.Provider != b.Provider {
+		return true
+	}
+	if a.UpstreamProxy != b.UpstreamProxy {
 		return true
 	}
 	if len(a.PoolIDs) != len(b.PoolIDs) {
@@ -168,7 +186,13 @@ func (m *Manager) startOneLocked(ctx context.Context, spec *config.ProviderSpec)
 	if !ok {
 		return fmt.Errorf("unknown provider plugin %q (registered: %v)", spec.Provider, pub.ProviderNames())
 	}
-	prov, err := factory(spec.Config)
+	// Route the provider's own fetches through its upstream_proxy, when it
+	// set one: the config map is a copy (the spec's map is shared with the
+	// store and providerChanged's comparison), carrying the resolved dialer
+	// under the reserved key. No upstream_proxy: the plugin's config map
+	// passes through as-is.
+	cfg := injectUpstreamDialer(spec.Config, upstreamDialerFor(m.upstream, spec))
+	prov, err := factory(cfg)
 	if err != nil {
 		return fmt.Errorf("instantiate provider %q: %w", spec.Provider, err)
 	}
