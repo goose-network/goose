@@ -72,6 +72,13 @@ func AsUpstreamDialer(cfg map[string]any) UpstreamDialer {
 // ProviderFactory builds a Provider from a plugin-specific config map.
 type ProviderFactory = api.ProviderFactory
 
+type ProviderStatus = api.ProviderStatus
+
+// StatusReporter is the optional Provider extension for observability; see
+// the api module's contract. The engine type-asserts providers against it
+// when building the provider status view.
+type StatusReporter = api.StatusReporter
+
 // DefaultProvider is re-exported from the api module: a provider plugin's
 // declaration of the zero-config default the engine seeds on a fresh
 // deployment (a config store with no providers). See the api module's docs

@@ -8,10 +8,13 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/goose-network/goose/internal/config"
 	"github.com/goose-network/goose/internal/core"
 	"github.com/goose-network/goose/internal/metrics"
+	"github.com/goose-network/goose/internal/provider"
+	pub "github.com/goose-network/goose/pkg/plugin"
 )
 
 // newAPIServer builds an API server backed by a fresh config store and a temp
@@ -409,5 +412,80 @@ func TestOpenAPISpecInSync(t *testing.T) {
 		if _, ok := paths[p]; !ok {
 			t.Errorf("spec is missing path %s", p)
 		}
+	}
+}
+
+// fakeStatusSource stubs the provider-status seam for the endpoint test.
+type fakeStatusSource struct {
+	sts []provider.ProviderStatus
+}
+
+func (f *fakeStatusSource) Status() []provider.ProviderStatus { return f.sts }
+
+// TestProviderStatusEndpoint verifies /api/providers/status: the wired
+// status source's view is served with plugin reports intact, and an
+// unwired server yields an empty list rather than an error. A provider
+// spec named "status" is deliberately not routed here — a collision is
+// resolved by renaming, documented at the route.
+func TestProviderStatusEndpoint(t *testing.T) {
+	// Build the server directly: the harness helper wires auth but has no
+	// way to set the status source.
+	store := config.NewStore()
+	ms, err := metrics.Open(t.TempDir() + "/api-status.db")
+	if err != nil {
+		t.Fatalf("metrics.Open: %v", err)
+	}
+	t.Cleanup(func() { ms.Close() })
+	srv := New(store, ms)
+
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() { hs.Close() })
+
+	// Unwired: empty list, 200.
+	code, body := do(t, hs, "GET", "/api/providers/status", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("unwired status: code %d, want 200", code)
+	}
+	if strings.TrimSpace(string(body)) != "[]" {
+		t.Fatalf("unwired status body = %q, want []", body)
+	}
+
+	// Wired: the merged view is served verbatim, plugin report included.
+	now := time.Now()
+	srv.SetProviderStatusSource(&fakeStatusSource{sts: []provider.ProviderStatus{
+		{
+			ID:            "psiphon",
+			Provider:      "psiphon",
+			Pools:         []string{"default"},
+			State:         "running",
+			OutboundCount: 12,
+			StartedAt:     now,
+			LastPollAt:    now,
+			LastOKAt:      now,
+			Plugin: &pub.ProviderStatus{
+				State:   "running",
+				Details: map[string]any{"servers_in_list": 9},
+			},
+		},
+	}})
+	code, body = do(t, hs, "GET", "/api/providers/status", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("wired status: code %d, want 200", code)
+	}
+	var got []provider.ProviderStatus
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal status: %v (%s)", err, body)
+	}
+	if len(got) != 1 || got[0].ID != "psiphon" || got[0].OutboundCount != 12 {
+		t.Fatalf("wired status = %s", body)
+	}
+	if got[0].Plugin == nil || got[0].Plugin.Details["servers_in_list"] != float64(9) {
+		t.Fatalf("plugin report missing: %s", body)
+	}
+
+	// Method policing.
+	code, _ = do(t, hs, "POST", "/api/providers/status", "", nil)
+	if code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status: code %d, want 405", code)
 	}
 }

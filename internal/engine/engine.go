@@ -107,6 +107,7 @@ func New(cfg *config.Store) (*Engine, error) {
 	// plugins route their own connections through the configured network stack
 	// (Router.StackDialer).
 	e.providers = provider.New(cfg, rtr, rtr)
+	e.api.SetProviderStatusSource(e.providers)
 	if err := e.providers.Start(); err != nil {
 		fmt.Printf("engine: provider start: %v\n", err)
 	}

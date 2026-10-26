@@ -1551,6 +1551,35 @@
                 }
             }
         },
+        "/api/providers/status": {
+            "get": {
+                "description": "Returns the live observability view of every dynamic outbound provider the engine tracks: lifecycle state (starting/running/error/stopped), last poll times and result, outbound count, pools fed, and — when the plugin implements the optional StatusReporter contract — its own self-reported details (e.g. Psiphon tunnel establishment per server and server-list state). Stopped or failed-to-start providers appear here too, so an empty pool is explainable without reading engine logs.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "providers"
+                ],
+                "summary": "List provider status",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/provider.ProviderStatus"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/providers/{id}": {
             "get": {
                 "description": "Returns all configured dynamic outbound providers. Each provider feeds one or more managed pools (pool_ids) with the outbounds it fetches; providers created without a pool_ids list report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_ids lists the managed pools its outbounds are merged into — every pool in the list receives the provider's full outbound set — and defaults to [\"default\"] when omitted (the legacy singular pool_id is still accepted as a one-entry list); config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and every pool it exclusively fed.",
@@ -2162,18 +2191,92 @@
                 }
             }
         },
+        "github_com_goose-network_goose_pkg_plugin.ProviderStatus": {
+            "type": "object",
+            "properties": {
+                "details": {
+                    "description": "Details carries plugin-specific live facts (counts, addresses,\ntimestamps). Keys are the plugin's own; the UI renders them as-is.",
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "message": {
+                    "description": "Message is one line of context for the state, e.g. the last error or\na progress note. Empty means \"nothing to say\".",
+                    "type": "string"
+                },
+                "state": {
+                    "description": "State is a short, human-readable phase word, e.g. \"running\",\n\"establishing\", \"error\". Plugins pick their own vocabulary; the\nengine surfaces it verbatim.",
+                    "type": "string"
+                }
+            }
+        },
+        "provider.ProviderStatus": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "description": "ID is the provider spec ID.",
+                    "type": "string"
+                },
+                "last_ok_at": {
+                    "description": "LastOKAt is when Outbounds last succeeded.",
+                    "type": "string"
+                },
+                "last_poll_at": {
+                    "description": "LastPollAt is when Outbounds was last called, successfully or not.",
+                    "type": "string"
+                },
+                "message": {
+                    "description": "Message carries the last Outbounds error when State is \"error\".",
+                    "type": "string"
+                },
+                "outbound_count": {
+                    "description": "OutboundCount is the last successful poll's outbound count.",
+                    "type": "integer"
+                },
+                "plugin": {
+                    "description": "Plugin holds the provider's own self-assessment, when it implements\npub.StatusReporter. Nil (and omitted from JSON) when it does not.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/github_com_goose-network_goose_pkg_plugin.ProviderStatus"
+                        }
+                    ]
+                },
+                "pools": {
+                    "description": "Pools lists the pool IDs the provider feeds.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "provider": {
+                    "description": "Provider is the plugin name, e.g. \"psiphon\".",
+                    "type": "string"
+                },
+                "started_at": {
+                    "description": "StartedAt is when the provider instance was instantiated.",
+                    "type": "string"
+                },
+                "state": {
+                    "description": "State is the engine's phase word: \"running\" (goroutine alive, last\npoll succeeded), \"error\" (last poll failed — pools kept stale), or\n\"starting\" (instantiated but not yet polled).",
+                    "type": "string"
+                }
+            }
+        },
         "time.Duration": {
             "type": "integer",
             "format": "int64",
             "enum": [
                 1,
                 1000,
-                1000000
+                1000000,
+                1000000000,
+                60000000000
             ],
             "x-enum-varnames": [
                 "Nanosecond",
                 "Microsecond",
-                "Millisecond"
+                "Millisecond",
+                "Second",
+                "Minute"
             ]
         }
     },

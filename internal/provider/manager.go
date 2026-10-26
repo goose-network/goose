@@ -56,6 +56,13 @@ type Manager struct {
 	cancel  context.CancelFunc
 	mu      sync.Mutex
 	running []specCancel // running provider goroutines + the specs they came from
+
+	// statusMu guards the per-provider observability view below. It is a
+	// separate lock from mu so Status (frequent, UI-polled) never contends
+	// with reconcile/start/stop churn.
+	statusMu sync.Mutex
+	// status holds one engine-observed snapshot per running provider ID.
+	status map[string]*ProviderStatus
 }
 
 // stackSource supplies the engine's configured network-stack dialer. The
@@ -71,7 +78,12 @@ type stackSource interface {
 // needs resolving (the corresponding dialer is then simply never injected).
 // It does not start polling; call Start.
 func New(cfg *config.Store, upstream upstreamSource, stack stackSource) *Manager {
-	return &Manager{cfg: cfg, upstream: upstream, stack: stack}
+	return &Manager{
+		cfg:      cfg,
+		upstream: upstream,
+		stack:    stack,
+		status:   map[string]*ProviderStatus{},
+	}
 }
 
 // Start instantiates and begins polling every provider currently in the config
@@ -130,6 +142,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 		w, ok := want[sc.spec.ID]
 		if !ok || providerChanged(sc.spec, w) {
 			sc.cancel()
+			m.recordStop(sc.spec.ID, nil)
 			continue
 		}
 		next = append(next, sc)
@@ -155,9 +168,12 @@ func (m *Manager) reconcile(ctx context.Context) {
 }
 
 // specCancel pairs a running provider's goroutine cancel with the spec it
-// was started from, so reconcile can detect config changes.
+// was started from, so reconcile can detect config changes, and with the
+// live provider instance, so Status can reach plugins implementing
+// pub.StatusReporter.
 type specCancel struct {
 	spec   *config.ProviderSpec
+	prov   pub.Provider
 	cancel context.CancelFunc
 }
 
@@ -204,6 +220,7 @@ func (m *Manager) startOne(ctx context.Context, spec *config.ProviderSpec) error
 func (m *Manager) startOneLocked(ctx context.Context, spec *config.ProviderSpec) error {
 	factory, ok := pub.LookupProvider(spec.Provider)
 	if !ok {
+		m.recordStop(spec.ID, fmt.Errorf("unknown provider plugin %q (registered: %v)", spec.Provider, pub.ProviderNames()))
 		return fmt.Errorf("unknown provider plugin %q (registered: %v)", spec.Provider, pub.ProviderNames())
 	}
 	// The config map the plugin is instantiated from carries the engine's
@@ -214,11 +231,14 @@ func (m *Manager) startOneLocked(ctx context.Context, spec *config.ProviderSpec)
 	cfg := m.prepareProviderConfig(spec)
 	prov, err := factory(cfg)
 	if err != nil {
-		return fmt.Errorf("instantiate provider %q: %w", spec.Provider, err)
+		err = fmt.Errorf("instantiate provider %q: %w", spec.Provider, err)
+		m.recordStop(spec.ID, err)
+		return err
 	}
 
 	provCtx, cancel := context.WithCancel(ctx)
-	m.running = append(m.running, specCancel{spec: spec, cancel: cancel})
+	m.running = append(m.running, specCancel{spec: spec, prov: prov, cancel: cancel})
+	m.recordStart(spec)
 
 	go m.run(provCtx, spec, prov)
 	return nil
@@ -272,9 +292,11 @@ func (m *Manager) run(ctx context.Context, spec *config.ProviderSpec, prov pub.P
 
 // poll calls the provider's Outbounds and merges the result into every pool
 // the spec targets (multi-pool fan-out: SetProviderOutbounds reads the
-// spec's effective pool IDs itself).
+// spec's effective pool IDs itself). The outcome — success or failure — is
+// recorded for the status view either way.
 func (m *Manager) poll(ctx context.Context, spec *config.ProviderSpec, prov pub.Provider) {
 	cfgs, err := prov.Outbounds(ctx)
+	m.recordResult(spec.ID, len(cfgs), err)
 	if err != nil {
 		// Keep the previous pools; a transient fetch failure shouldn't drain
 		// them. The provider's next refresh will retry.

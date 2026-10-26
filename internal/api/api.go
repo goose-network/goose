@@ -21,6 +21,7 @@ import (
 	"github.com/goose-network/goose/internal/core"
 	"github.com/goose-network/goose/internal/exitip"
 	"github.com/goose-network/goose/internal/metrics"
+	"github.com/goose-network/goose/internal/provider"
 )
 
 //	@title			goose admin API
@@ -54,6 +55,12 @@ type probeReporter interface {
 	ChainProbeStatus() []core.ProbeStatus
 }
 
+// providerStatusSource supplies the merged provider observability view (the
+// provider Manager implements it).
+type providerStatusSource interface {
+	Status() []provider.ProviderStatus
+}
+
 // exitRunner runs exit-IP check rounds on demand (the exitip Manager
 // implements it).
 type exitRunner interface {
@@ -67,6 +74,7 @@ type Server struct {
 	mux    *http.ServeMux
 	probes probeReporter
 	checks exitRunner
+	pstats providerStatusSource
 }
 
 // New builds an API server bound to the config store and metrics store.
@@ -84,6 +92,11 @@ func (s *Server) SetProbeReporter(p probeReporter) { s.probes = p }
 // Optional: without it, POST /api/exit-checks/run reports 503.
 func (s *Server) SetExitRunner(r exitRunner) { s.checks = r }
 
+// SetProviderStatusSource wires the merged provider observability view (the
+// provider Manager). Optional: without it, GET /api/providers/status reports
+// an empty list.
+func (s *Server) SetProviderStatusSource(p providerStatusSource) { s.pstats = p }
+
 // Handler returns the HTTP handler (for embedding in a custom server).
 func (s *Server) Handler() http.Handler { return s.mux }
 
@@ -99,6 +112,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/chains/probes", s.chainProbes)
 	s.mux.HandleFunc("/api/providers", s.providers)
 	s.mux.HandleFunc("/api/providers/", s.providers)
+	// ServeMux prefers the more specific pattern, so this exact literal
+	// wins over the /api/providers/ subtree; a provider spec whose ID is
+	// literally "status" is still fully manageable — POST/PUT/DELETE and
+	// its entry in the collection GET all work — only its single-item GET
+	// shadows. Operators resolve that by renaming the spec.
+	s.mux.HandleFunc("/api/providers/status", s.providerStatus)
 	s.mux.HandleFunc("/api/metrics", s.metricsHandler)
 	s.mux.HandleFunc("/api/engine", s.engine)
 	s.mux.HandleFunc("/api/exit-checks", s.exitChecks)
@@ -408,6 +427,27 @@ func (s *Server) outbounds(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
+}
+
+//	listProviderStatus godoc
+//
+//	@Summary      List provider status
+//	@Description  Returns the live observability view of every dynamic outbound provider the engine tracks: lifecycle state (starting/running/error/stopped), last poll times and result, outbound count, pools fed, and — when the plugin implements the optional StatusReporter contract — its own self-reported details (e.g. Psiphon tunnel establishment per server and server-list state). Stopped or failed-to-start providers appear here too, so an empty pool is explainable without reading engine logs.
+//	@Tags         providers
+//	@Produce      json
+//	@Success      200 {array} provider.ProviderStatus
+//	@Failure      401 {object} errResponse
+//	@Router       /api/providers/status [get]
+func (s *Server) providerStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
+		return
+	}
+	if s.pstats == nil {
+		writeJSON(w, []provider.ProviderStatus{}, http.StatusOK)
+		return
+	}
+	writeJSON(w, s.pstats.Status(), http.StatusOK)
 }
 
 // --- pools ---

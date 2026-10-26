@@ -506,3 +506,147 @@ func waitFor(t *testing.T, cond func() bool, timeout time.Duration, what string)
 	}
 	t.Fatalf("timed out waiting for: %s", what)
 }
+
+// statusFakeProvider extends the fake with a self-reported status, to verify
+// the engine view merges plugin reports.
+type statusFakeProvider struct {
+	fakeProvider
+	status atomic.Value // pub.ProviderStatus
+}
+
+func (f *statusFakeProvider) Status() pub.ProviderStatus {
+	if v, ok := f.status.Load().(pub.ProviderStatus); ok {
+		return v
+	}
+	return pub.ProviderStatus{}
+}
+
+// TestManagerStatusView verifies the per-provider observability view: a
+// successfully polled provider reports running with its outbound count and
+// pools; a failing provider reports error with the last message; a plugin
+// implementing StatusReporter contributes its live self-assessment; and a
+// deleted provider leaves a stopped snapshot behind instead of silence.
+func TestManagerStatusView(t *testing.T) {
+	okProv := &statusFakeProvider{fakeProvider: fakeProvider{name: "fake", watch: make(chan struct{}, 1)}}
+	okProv.set([]pub.OutboundConfig{
+		{ID: "a", Protocol: "direct", Config: map[string]any{}},
+		{ID: "b", Protocol: "direct", Config: map[string]any{}},
+	})
+	okProv.status.Store(pub.ProviderStatus{
+		State:   "running",
+		Message: "all good",
+		Details: map[string]any{"servers": 2},
+	})
+	pub.RegisterProvider("fake-status-ok", newFakeFactory(okProv))
+
+	errProv := &errorProvider{watch: make(chan struct{}, 1)}
+	pub.RegisterProvider("fake-status-err", newFakeFactory(errProv))
+
+	store := config.NewStore()
+	store.SetProvider(&config.ProviderSpec{
+		ID:       "sok",
+		Provider: "fake-status-ok",
+		PoolIDs:  []string{"pool-s"},
+		Config:   map[string]any{},
+	})
+	store.SetProvider(&config.ProviderSpec{
+		ID:       "serr",
+		Provider: "fake-status-err",
+		PoolIDs:  []string{"pool-s"},
+		Config:   map[string]any{},
+	})
+
+	mgr := New(store, nil, nil)
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Close()
+
+	waitFor := func(cond func([]ProviderStatus) bool) []ProviderStatus {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sts := mgr.Status()
+			if cond(sts) {
+				return sts
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return mgr.Status()
+	}
+
+	sts := waitFor(func(sts []ProviderStatus) bool {
+		for _, st := range sts {
+			if st.ID == "sok" && st.State == "running" && st.OutboundCount == 2 {
+				return true
+			}
+		}
+		return false
+	})
+	var okStatus ProviderStatus
+	for _, st := range sts {
+		if st.ID == "sok" {
+			okStatus = st
+		}
+	}
+	if okStatus.State != "running" {
+		t.Errorf("ok provider state = %q, want running", okStatus.State)
+	}
+	if okStatus.OutboundCount != 2 {
+		t.Errorf("ok provider outbound count = %d, want 2", okStatus.OutboundCount)
+	}
+	if len(okStatus.Pools) != 1 || okStatus.Pools[0] != "pool-s" {
+		t.Errorf("ok provider pools = %v, want [pool-s]", okStatus.Pools)
+	}
+	if okStatus.Plugin == nil {
+		t.Fatal("ok provider status missing plugin report")
+	}
+	if okStatus.Plugin.State != "running" || okStatus.Plugin.Message != "all good" {
+		t.Errorf("plugin report = %+v, want state running / message all good", okStatus.Plugin)
+	}
+	if okStatus.Plugin.Details["servers"] != 2 {
+		t.Errorf("plugin details = %v, want servers=2", okStatus.Plugin.Details)
+	}
+	if okStatus.LastOKAt.IsZero() || okStatus.LastPollAt.IsZero() || okStatus.StartedAt.IsZero() {
+		t.Errorf("timestamps not populated: %+v", okStatus)
+	}
+
+	var errStatus ProviderStatus
+	for _, st := range sts {
+		if st.ID == "serr" {
+			errStatus = st
+		}
+	}
+	if errStatus.State != "error" {
+		t.Errorf("err provider state = %q, want error", errStatus.State)
+	}
+	if errStatus.Message == "" {
+		t.Error("err provider status carries no error message")
+	}
+	if errStatus.Plugin != nil {
+		t.Errorf("err provider has a plugin report without implementing StatusReporter: %+v", errStatus.Plugin)
+	}
+
+	// Deleting the provider leaves a terminal snapshot, not silence.
+	store.DeleteProvider("sok")
+	deadline := time.Now().Add(2 * time.Second)
+	var stopped ProviderStatus
+	found := false
+	for time.Now().Before(deadline) {
+		for _, st := range mgr.Status() {
+			if st.ID == "sok" && st.State == "stopped" {
+				stopped, found = st, true
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !found {
+		t.Fatalf("deleted provider left no stopped snapshot: %+v", mgr.Status())
+	}
+	if stopped.Plugin != nil {
+		t.Errorf("stopped snapshot still carries a live plugin report: %+v", stopped.Plugin)
+	}
+}

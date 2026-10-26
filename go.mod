@@ -350,4 +350,3 @@ replace github.com/geph-official/geph5-go => ../geph5-go
 replace github.com/goose-network/openrung-go => ../openrung-go
 
 replace github.com/openrung/openrung/brokerapi => ../openrung/brokerapi
-
