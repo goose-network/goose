@@ -14,6 +14,11 @@
 // start, so pool membership changes, access-pool edits, and rebuilt outbounds
 // apply to running providers without a restart. Editing the reference itself
 // does restart the provider (providerChanged compares it).
+// The manager also injects the engine's layer-3/4 stack dialer
+// (pkg/plugin.StackDialerKey) into every provider's config, so plugins that
+// dial their own servers route those connections through the engine's
+// configured network stack (system kernel stack or userspace gvisor) —
+// the "plugin uses the engine's L3/L4 ability" side of the plugin seam.
 package provider
 
 import (
@@ -41,17 +46,37 @@ func upstreamDialerFor(src upstreamSource, spec *config.ProviderSpec) pub.Upstre
 	return src.UpstreamDialer(spec)
 }
 
-// injectUpstreamDialer returns cfg with d stored under the reserved
-// upstream-dialer key. The spec's config map is shared with the config store
-// and with providerChanged's comparison, so it is copied, never mutated.
-func injectUpstreamDialer(cfg map[string]any, d pub.UpstreamDialer) map[string]any {
-	if d == nil {
+// prepareProviderConfig returns the config map to instantiate spec's plugin
+// with: the spec's own map carrying the engine-reserved injection keys — the
+// stack dialer under StackDialerKey, and the upstream-proxy dialer under
+// UpstreamDialerKey when the spec routes fetches through one. The spec's
+// config map is shared with the config store and with providerChanged's
+// comparison, so it is copied, never mutated. When neither dialer applies
+// the original map passes through as-is.
+func (m *Manager) prepareProviderConfig(spec *config.ProviderSpec) map[string]any {
+	cfg := spec.Config
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+
+	var stackDialer pub.StackDialer
+	if m.stack != nil {
+		stackDialer = m.stack.StackDialer()
+	}
+	upstream := upstreamDialerFor(m.upstream, spec)
+	if stackDialer == nil && upstream == nil {
 		return cfg
 	}
-	out := make(map[string]any, len(cfg)+1)
+
+	out := make(map[string]any, len(cfg)+2)
 	for k, v := range cfg {
 		out[k] = v
 	}
-	out[pub.UpstreamDialerKey] = d
+	if stackDialer != nil {
+		out[pub.StackDialerKey] = stackDialer
+	}
+	if upstream != nil {
+		out[pub.UpstreamDialerKey] = upstream
+	}
 	return out
 }

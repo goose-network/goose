@@ -26,9 +26,6 @@
 package plugin
 
 import (
-	"context"
-	"net"
-
 	api "github.com/goose-network/goose-plugin-api"
 )
 
@@ -45,27 +42,31 @@ type OutboundConfig = api.OutboundConfig
 // Provider is a dynamic source of outbound configs.
 type Provider = api.Provider
 
-// UpstreamDialer dials a fetch target through the upstream proxy configured on
-// a provider spec (config.ProviderSpec.UpstreamProxy — a specific outbound, a
-// pool, or an access-pool fallback). The engine resolves the reference
+// UpstreamDialer is re-exported from the api module: the dialer routing a
+// provider's own fetches through the upstream proxy configured on its spec
+// (config.ProviderSpec.UpstreamProxy). The engine resolves the reference
 // against live config and injects the dialer into the provider's config map
 // under the reserved "_upstream_dialer" key before instantiating the plugin;
-// URL-fetching providers type-assert it out and wire it as their HTTP
-// transport's DialContext so their downloads honor the route. The key is
-// absent (or the assertion fails) when no upstream proxy is configured —
-// fetch directly in that case.
+// URL-fetching providers type-assert it out with AsUpstreamDialer and wire it
+// as their HTTP transport's dialer so their downloads honor the route. The
+// key is absent (or the assertion fails) when no upstream proxy is
+// configured — fetch directly in that case.
 //
 // The returned connection is a tunnel to address: the upstream's proxy
 // handshake has already been performed, and the target protocol (TLS, HTTP,
 // ...) runs over it directly.
-//
-// This contract lives in the goose module for now; it is expected to graduate
-// to github.com/goose-network/goose-plugin-api (alongside Dialer) once
-// external provider plugins adopt routed fetches.
-type UpstreamDialer interface {
-	// DialUpstream dials address (host:port) through the provider's
-	// configured upstream proxy. network is "tcp" or "udp".
-	DialUpstream(ctx context.Context, network, address string) (net.Conn, error)
+type UpstreamDialer = api.UpstreamDialer
+
+// UpstreamDialerKey is the reserved provider config-map key the engine uses
+// to inject an UpstreamDialer (config.ProviderSpec.UpstreamProxy) into a
+// provider before instantiation. Plugin configs must not use the
+// "_upstream_dialer" name for their own fields.
+const UpstreamDialerKey = api.UpstreamDialerKey
+
+// AsUpstreamDialer extracts the engine-injected upstream dialer from a
+// provider config map, or nil when no upstream proxy is configured.
+func AsUpstreamDialer(cfg map[string]any) UpstreamDialer {
+	return api.AsUpstreamDialer(cfg)
 }
 
 // ProviderFactory builds a Provider from a plugin-specific config map.
@@ -86,24 +87,25 @@ func RegisterDefaultProvider(dp DefaultProvider) { api.RegisterDefaultProvider(d
 // provider, or false when no plugin declared one.
 func LookupDefaultProvider() (DefaultProvider, bool) { return api.LookupDefaultProvider() }
 
-// UpstreamDialerKey is the reserved provider config-map key the engine uses
-// to inject an UpstreamDialer (config.ProviderSpec.UpstreamProxy) into a
-// provider before instantiation. Plugin configs must not use the
-// "_upstream_dialer" name for their own fields.
-const UpstreamDialerKey = "_upstream_dialer"
-
-// AsUpstreamDialer extracts the engine-injected upstream dialer from a
-// provider config map, or nil when no upstream proxy is configured.
-func AsUpstreamDialer(cfg map[string]any) UpstreamDialer {
-	if cfg == nil {
-		return nil
-	}
-	d, _ := cfg[UpstreamDialerKey].(UpstreamDialer)
-	return d
-}
-
 // Dialer is the minimal dial capability a plugin needs from the engine.
 type Dialer = api.Dialer
+
+// StackDialer is re-exported from the api module: the engine's layer-3/4
+// dial capability (the configured system or gvisor stack). Providers get it
+// injected into their config map under StackDialerKey and type-assert it
+// out with AsStackDialer, so a plugin's own connections reach their
+// servers through the engine's network stack.
+type StackDialer = api.StackDialer
+
+// StackDialerKey is the reserved provider config-map key the engine uses to
+// inject its stack dialer into a provider before instantiation — the same
+// key the router injects into outbound configs. Plugin configs must not
+// use the "_dialer" name for their own fields.
+const StackDialerKey = api.StackDialerKey
+
+// AsStackDialer extracts the engine-injected stack dialer from a provider
+// config map, or nil when none was injected.
+func AsStackDialer(cfg map[string]any) StackDialer { return api.AsStackDialer(cfg) }
 
 // Network names a transport network for a target address.
 type Network = api.Network

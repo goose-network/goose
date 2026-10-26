@@ -30,6 +30,7 @@ import (
 	"github.com/goose-network/goose/internal/plugin"
 	"github.com/goose-network/goose/internal/selector"
 	"github.com/goose-network/goose/internal/stack"
+	pub "github.com/goose-network/goose/pkg/plugin"
 )
 
 // Router routes inbound connections through the configured chains.
@@ -114,6 +115,16 @@ func New(cfg *config.Store, ms *metrics.Store, stk stack.Stack) *Router {
 // owned resources; the engine closes it before the stack and metrics store.
 func (r *Router) Close() {
 	r.stopProber()
+}
+
+// StackDialer returns the engine's configured network-stack dialer — the
+// layer-3/4 ability (the host kernel's system stack, or the userspace
+// gvisor netstack). The provider manager injects it into provider configs
+// under pkg/plugin.StackDialerKey so plugins can route their own
+// connections through the engine's stack instead of opening bare sockets.
+// It implements the provider package's stackSource.
+func (r *Router) StackDialer() pub.StackDialer {
+	return r.stack
 }
 
 // Rebuild reconciles runtime objects from the current config. Called on

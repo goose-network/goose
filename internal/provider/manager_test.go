@@ -78,7 +78,7 @@ func TestManagerMergesProviderOutboundsIntoPool(t *testing.T) {
 		{ID: "fake-b", Protocol: "socks5", Config: map[string]any{"address": "127.0.0.1:2"}},
 	})
 
-	mgr := New(store, nil)
+	mgr := New(store, nil, nil)
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestManagerDefaultsToDefaultPool(t *testing.T) {
 		{ID: "def-a", Protocol: "socks5", Config: map[string]any{"address": "127.0.0.1:21"}},
 	})
 
-	mgr := New(store, nil)
+	mgr := New(store, nil, nil)
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestManagerKeepsPoolOnProviderError(t *testing.T) {
 		Config:   map[string]any{},
 	})
 
-	mgr := New(store, nil)
+	mgr := New(store, nil, nil)
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -214,7 +214,7 @@ func (errSentinel) Error() string { return "fake provider error" }
 func TestManagerReconcilesOnConfigChange(t *testing.T) {
 	store := config.NewStore()
 
-	mgr := New(store, nil)
+	mgr := New(store, nil, nil)
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestManagerInjectsUpstreamDialer(t *testing.T) {
 	store.SetProvider(spec)
 
 	up := &fakeUpstreamSource{}
-	mgr := New(store, up)
+	mgr := New(store, up, nil)
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -379,6 +379,118 @@ func TestProviderChangedOnUpstreamProxyEdit(t *testing.T) {
 	}
 	if !providerChanged(spec("outbound:a"), spec("outbound:b")) {
 		t.Fatal("changing the upstream_proxy route must count as changed")
+	}
+}
+
+// stubStackDialer stands in for the engine's stack dialer; no test here dials
+// through it, so it refuses loudly.
+type stubStackDialer struct{}
+
+func (stubStackDialer) Dial(context.Context, string, string) (net.Conn, error) {
+	return nil, errors.New("provider manager test: unexpected stack dial")
+}
+
+// fakeStackSource hands out the stack dialer.
+type fakeStackSource struct{}
+
+func (fakeStackSource) StackDialer() pub.StackDialer { return stubStackDialer{} }
+
+// TestManagerInjectsStackDialer verifies the L3/L4-ability wiring: the manager
+// passes every factory a config copy carrying the engine's stack dialer under
+// the reserved key — even with no upstream_proxy — without polluting the
+// spec's shared config map.
+func TestManagerInjectsStackDialer(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		gotCfgs []map[string]any
+	)
+	pub.RegisterProvider("fake-stack-inject-test", func(cfg map[string]any) (pub.Provider, error) {
+		mu.Lock()
+		gotCfgs = append(gotCfgs, cfg)
+		mu.Unlock()
+		return &fakeProvider{name: "fake-stack-inject-test", watch: make(chan struct{}, 1)}, nil
+	})
+
+	store := config.NewStore()
+	spec := &config.ProviderSpec{
+		ID:       "pstack",
+		Provider: "fake-stack-inject-test",
+		Config:   map[string]any{"region": "de"},
+	}
+	store.SetProvider(spec)
+
+	mgr := New(store, nil, fakeStackSource{})
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Close()
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(gotCfgs) == 1
+	}, 2*time.Second, "factory instantiation with injected stack dialer")
+
+	mu.Lock()
+	cfg := gotCfgs[0]
+	mu.Unlock()
+
+	if _, ok := cfg[pub.StackDialerKey].(pub.StackDialer); !ok {
+		t.Fatalf("factory config lacks the stack dialer under %q: %v", pub.StackDialerKey, cfg)
+	}
+	if cfg["region"] != "de" {
+		t.Errorf("plugin's own config keys lost: %v", cfg)
+	}
+	if _, polluted := spec.Config[pub.StackDialerKey]; polluted {
+		t.Fatal("the spec's shared config map must not gain the dialer key")
+	}
+}
+
+// closableProvider wraps a fakeProvider and records Close calls, the shape a
+// resource-owning provider (running tunnels, a datastore, a process) has.
+type closableProvider struct {
+	fakeProvider
+	closed int32
+}
+
+func (c *closableProvider) Close() error {
+	atomic.AddInt32(&c.closed, 1)
+	return nil
+}
+
+// TestManagerCallsProviderCloseOnStop verifies the provider lifecycle: stopping
+// a provider — deleting its spec (via Close) or editing it into a restart —
+// calls the provider's Close, releasing resources it owned for its whole life.
+func TestManagerCallsProviderCloseOnStop(t *testing.T) {
+	cp := &closableProvider{fakeProvider: fakeProvider{name: "closable", watch: make(chan struct{}, 1)}}
+	pub.RegisterProvider("fake-closable-test", newFakeFactory(cp))
+
+	store := config.NewStore()
+	store.SetProvider(&config.ProviderSpec{
+		ID:       "pclose",
+		Provider: "fake-closable-test",
+		PoolIDs:  []string{"pool-close"},
+		Config:   map[string]any{},
+	})
+
+	mgr := New(store, nil, nil)
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Close()
+
+	waitFor(t, func() bool {
+		return atomic.LoadInt32(&cp.calls) > 0
+	}, 2*time.Second, "closable provider is polled at least once")
+
+	// Deleting the spec stops the poll loop, which must Close the provider.
+	store.DeleteProvider("pclose")
+	waitFor(t, func() bool {
+		return atomic.LoadInt32(&cp.closed) == 1
+	}, 2*time.Second, "deleted provider is Closed")
+
+	if got := atomic.LoadInt32(&cp.closed); got != 1 {
+		t.Fatalf("provider Closed %d times, want exactly 1", got)
 	}
 }
 

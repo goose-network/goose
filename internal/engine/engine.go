@@ -100,10 +100,13 @@ func New(cfg *config.Store) (*Engine, error) {
 	// Manager.Start itself is failure-tolerant: a provider that cannot start
 	// (unknown plugin, bad config) is logged and skipped, not fatal.
 	//
-	// The router is the providers' upstream source: a spec whose
-	// upstream_proxy routes its fetches through an engine outbound/pool gets
-	// a dialer resolved against live config (see internal/router/upstream.go).
-	e.providers = provider.New(cfg, rtr)
+	// The router is both sources the provider manager needs: a spec whose
+	// upstream_proxy routes its fetches through an engine outbound/pool gets a
+	// dialer resolved against live config (see internal/router/upstream.go),
+	// and every provider is handed the engine's layer-3/4 stack dialer so
+	// plugins route their own connections through the configured network stack
+	// (Router.StackDialer).
+	e.providers = provider.New(cfg, rtr, rtr)
 	if err := e.providers.Start(); err != nil {
 		fmt.Printf("engine: provider start: %v\n", err)
 	}

@@ -5,7 +5,7 @@
 // chain — engine, admin API, geph client, geph exit, and the target HTTP
 // server — lives in the test process:
 //
-//	HTTP client → goose http inbound → pool policy → socks5 outbound →
+//	HTTP client → goose http inbound → pool policy → geph outbound →
 //	  embedded geph5 client (plugin) → encrypted tunnel → embedded geph5
 //	  exit → loopback target
 //
@@ -64,7 +64,7 @@ func TestE2E_GephProviderStandalone(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "create provider: %s", body)
 
-	// 4. Wait for the provider's socks5 outbound to land in the default pool.
+	// 4. Wait for the provider's geph outbound to land in the default pool.
 	//    This is the slow part: a real session to the embedded exit must come
 	//    up (real handshake, real tunnel — only the network path is loopback).
 	outboundID := "geph"
@@ -91,7 +91,7 @@ func TestE2E_GephProviderStandalone(t *testing.T) {
 	}, 150*time.Second, 500*time.Millisecond, "geph provider outbound never landed in the default pool")
 
 	// 5. An authenticated HTTP inbound routed through the default pool, with
-	//    a protocol filter that allows the provider's socks5 outbound.
+	//    a protocol filter that allows the provider's geph outbound.
 	port := freePort(t)
 	resp, body = api.do(http.MethodPost, "/api/inbounds", config.Inbound{
 		ID: "geph-in", Protocol: "http",
@@ -99,7 +99,7 @@ func TestE2E_GephProviderStandalone(t *testing.T) {
 		Users:  []config.User{{Username: "app", Password: "secret"}},
 		Policy: config.InboundPolicy{
 			PoolID:  config.DefaultPoolID,
-			Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []string{"socks5"}}}},
+			Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []string{"geph"}}}},
 		},
 	})
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "create inbound: %s", body)
@@ -114,7 +114,7 @@ func TestE2E_GephProviderStandalone(t *testing.T) {
 		return true
 	}, 5*time.Second, 50*time.Millisecond, "inbound listener did not come up")
 
-	// 6. Push the request through the whole chain: engine → socks5 outbound →
+	// 6. Push the request through the whole chain: engine → geph outbound →
 	//    embedded client → tunnel → embedded exit → loopback target.
 	cli := &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{
 		Proxy: func(*http.Request) (*url.URL, error) {

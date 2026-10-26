@@ -22,16 +22,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 pins=(
-  github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20261026084630-4cbc6f2e67ab
+  github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20261026123131-fb552d7d52b0
   github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20261026084644-4502c345260f
   github.com/Psiphon-Labs/psiphon-tunnel-core=github.com/goose-network/psiphon-tunnel-core@v0.0.0-20260923221754-213987d32b71
-  github.com/goose-network/goose-plugin-mihomo=github.com/goose-network/goose-plugin-mihomo@v0.0.0-20261015113701-b4a0a13af363
-  github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261026061616-a174fc95b10f
+  github.com/goose-network/goose-plugin-mihomo=github.com/goose-network/goose-plugin-mihomo@v0.0.0-20261026124232-79094f230b24
+  github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261026124251-8f50bf5efc05
   github.com/Psiphon-Labs/quic-go=github.com/goose-network/psiphon-quic-go@v0.0.0-20261026053528-9822823f4fad
   github.com/metacubex/mihomo=github.com/metacubex/mihomo@v0.0.0-20260922124647-afe94dafef8c
   github.com/sagernet/sing-box=github.com/sagernet/sing-box@v0.0.0-20260922113237-e5e705ed802d
-  github.com/geph-official/geph5-go=github.com/goose-network/geph5-go@v0.0.0-20261024111313-8c6ac2fbe21d
-  github.com/goose-network/openrung-go=github.com/goose-network/openrung-go@v0.0.0-20261015113945-02801c2ff446
+  github.com/geph-official/geph5-go=github.com/goose-network/geph5-go@v0.0.0-20261026124207-5ff1a686f164
+  github.com/goose-network/openrung-go=github.com/goose-network/openrung-go@v0.0.0-20261026124742-1328643f58ce
   github.com/openrung/openrung/brokerapi=github.com/openrung/openrung/brokerapi@v0.7.1-0.20260923074427-404d84a15812
 )
 

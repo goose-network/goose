@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/goose-network/goose-plugin-api v0.0.0
 	github.com/goose-network/goose-plugin-psiphon v0.0.0
-	github.com/goose-network/tor-go v0.0.3
+	github.com/goose-network/tor-go v0.0.4
 	github.com/stretchr/testify v1.12.1
 	go.etcd.io/bbolt v1.4.0
 	gvisor.dev/gvisor v0.0.0-20260218152508-eed1cebf761e
@@ -350,3 +350,4 @@ replace github.com/geph-official/geph5-go => ../geph5-go
 replace github.com/goose-network/openrung-go => ../openrung-go
 
 replace github.com/openrung/openrung/brokerapi => ../openrung/brokerapi
+

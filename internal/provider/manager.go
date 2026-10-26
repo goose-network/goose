@@ -15,6 +15,11 @@
 // Store.SetProviderOutbounds, which replaces the provider's managed outbounds
 // and rebuilds every pool it feeds (a provider can target several pools via
 // pool_ids), bumping the config version so the router rebuilds.
+//
+// A provider whose spec is removed (or changed, restarting it) is cancelled;
+// when it implements Close() error the manager calls it, releasing resources
+// the provider owned for its whole life (running tunnels, datastores,
+// processes).
 package provider
 
 import (
@@ -41,17 +46,32 @@ type Manager struct {
 	// The engine wires the router in; tests can stand in or omit it.
 	upstream upstreamSource
 
+	// stack supplies the engine's layer-3/4 stack dialer (system or
+	// gvisor), injected into every provider's config under
+	// pkg/plugin.StackDialerKey so plugins route their own connections
+	// through the engine's network stack. The router implements it; tests
+	// can stand in or omit it.
+	stack stackSource
+
 	cancel  context.CancelFunc
 	mu      sync.Mutex
 	running []specCancel // running provider goroutines + the specs they came from
 }
 
+// stackSource supplies the engine's configured network-stack dialer. The
+// router implements it (Router.StackDialer).
+type stackSource interface {
+	StackDialer() pub.StackDialer
+}
+
 // New constructs a Manager. The upstream source (the router, in the engine)
 // supplies fetch dialers for providers whose spec routes fetches through an
-// upstream proxy; it may be nil when nothing needs resolving (the dialer is
-// then simply never injected). It does not start polling; call Start.
-func New(cfg *config.Store, upstream upstreamSource) *Manager {
-	return &Manager{cfg: cfg, upstream: upstream}
+// upstream proxy; the stack source (also the router) supplies the engine
+// stack dialer injected into every provider. Either may be nil when nothing
+// needs resolving (the corresponding dialer is then simply never injected).
+// It does not start polling; call Start.
+func New(cfg *config.Store, upstream upstreamSource, stack stackSource) *Manager {
+	return &Manager{cfg: cfg, upstream: upstream, stack: stack}
 }
 
 // Start instantiates and begins polling every provider currently in the config
@@ -186,12 +206,12 @@ func (m *Manager) startOneLocked(ctx context.Context, spec *config.ProviderSpec)
 	if !ok {
 		return fmt.Errorf("unknown provider plugin %q (registered: %v)", spec.Provider, pub.ProviderNames())
 	}
-	// Route the provider's own fetches through its upstream_proxy, when it
-	// set one: the config map is a copy (the spec's map is shared with the
-	// store and providerChanged's comparison), carrying the resolved dialer
-	// under the reserved key. No upstream_proxy: the plugin's config map
-	// passes through as-is.
-	cfg := injectUpstreamDialer(spec.Config, upstreamDialerFor(m.upstream, spec))
+	// The config map the plugin is instantiated from carries the engine's
+	// injection keys: the stack dialer (L3/L4 ability) always, and the
+	// upstream-proxy dialer when the spec routes fetches through one. It is a
+	// copy — the spec's map is shared with the store and providerChanged's
+	// comparison — and passes through as-is when neither applies.
+	cfg := m.prepareProviderConfig(spec)
 	prov, err := factory(cfg)
 	if err != nil {
 		return fmt.Errorf("instantiate provider %q: %w", spec.Provider, err)
@@ -206,6 +226,19 @@ func (m *Manager) startOneLocked(ctx context.Context, spec *config.ProviderSpec)
 
 // run is the per-provider loop: bootstrap, then select on Watch + ticker.
 func (m *Manager) run(ctx context.Context, spec *config.ProviderSpec, prov pub.Provider) {
+	// The provider owns background resources its whole life (Psiphon's
+	// controller and datastore, a running Tor process, ...). Stopping the
+	// poll loop releases them: a provider may expose a Close for that, and
+	// stopping without one keeps its semantics (e.g. tor's process is left
+	// to the plugin's own cleanup elsewhere).
+	defer func() {
+		if c, ok := prov.(interface{ Close() error }); ok {
+			if err := c.Close(); err != nil {
+				fmt.Printf("provider: %s Close: %v\n", spec.ID, err)
+			}
+		}
+	}()
+
 	// Bootstrap: populate the pool immediately so the engine doesn't start
 	// with an empty provider pool. If the provider isn't ready yet (e.g.
 	// Psiphon hasn't established its tunnel), Outbounds returns an empty set

@@ -5,7 +5,7 @@
 // handshake, picomux tunnel — to the exit), then pushes a real HTTP request
 // through the whole chain:
 //
-//	HTTP client → goose http inbound → pool policy → socks5 outbound →
+//	HTTP client → goose http inbound → pool policy → geph outbound →
 //	  embedded geph5 client (plugin) → encrypted tunnel → Rust geph5-exit →
 //	  real internet target
 //
@@ -115,7 +115,7 @@ city: test
 	// 3. Provision the geph provider with a direct exit constraint (no broker
 	//    needed). Its embedded geph5 client dials the exit, completes the
 	//    real handshake, and — once a session is live — contributes one
-	//    socks5 outbound to the default pool.
+	//    geph outbound to the default pool.
 	resp, body := api.do(http.MethodPost, "/api/providers", config.ProviderSpec{
 		ID:       "geph1",
 		Provider: "geph",
@@ -123,7 +123,7 @@ city: test
 	})
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "create provider: %s", body)
 
-	// 4. Wait for the provider's socks5 outbound to land in the default pool.
+	// 4. Wait for the provider's geph outbound to land in the default pool.
 	//    This is the slow part: a real session must come up.
 	outboundID := "geph"
 	require.Eventually(t, func() bool {
@@ -149,7 +149,7 @@ city: test
 	}, 150*time.Second, 500*time.Millisecond, "geph provider outbound never landed in the default pool")
 
 	// 5. An authenticated HTTP inbound routed through the default pool, with
-	//    a protocol filter that allows the provider's socks5 outbound.
+	//    a protocol filter that allows the provider's geph outbound.
 	port := freePort(t)
 	resp, body = api.do(http.MethodPost, "/api/inbounds", config.Inbound{
 		ID: "geph-in", Protocol: "http",
@@ -157,7 +157,7 @@ city: test
 		Users:  []config.User{{Username: "app", Password: "secret"}},
 		Policy: config.InboundPolicy{
 			PoolID:  config.DefaultPoolID,
-			Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []string{"socks5"}}}},
+			Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []string{"geph"}}}},
 		},
 	})
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "create inbound: %s", body)
