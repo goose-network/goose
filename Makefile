@@ -6,13 +6,19 @@ SWAG        := $(shell command -v swag 2>/dev/null || echo $(HOME)/go/bin/swag)
 SWAG_FLAGS  := init -g api.go -d . --ot json -o ./docs --parseDependency -q
 OPENAPI_DIR := internal/api/docs
 
+# sing-box gates its QUIC outbounds (hysteria, hysteria2, tuic) behind the
+# with_quic build tag; the engine builds with it so the singbox plugin
+# registers every dialable sing-box type. The bare (untagged) build still
+# compiles — the plugin ships quic_stub.go for exactly that shape.
+GO_TAGS := with_quic
+
 .PHONY: build test openapi clean
 
 build:
-	go build ./...
+	go build -tags "$(GO_TAGS)" ./...
 
 test:
-	go test ./...
+	go test -tags "$(GO_TAGS)" ./...
 
 # openapi regenerates the committed OpenAPI 2.0 document
 # (internal/api/docs/swagger.json) from the swag annotations in

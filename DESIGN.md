@@ -23,7 +23,12 @@ together, and persists per-request metrics to a local database.
 7. **Proxy chains** — API to create an inbound whose traffic traverses a
    chain of outbounds, each layer with its own filters.
 8. **Pluggable outbounds** — outbound protocols are plugins living in other
-   repos; the engine defines the plugin interface and loads them.
+   repos; the engine defines the plugin interface and loads them. Together
+   the mihomo and sing-box plugins register every dialable protocol their
+   upstream projects offer (mihomo's full set; sing-box's socks, http,
+   shadowsocks, vmess, vless, trojan, snell, ssh, anytls, shadowtls, tor,
+   plus hysteria/hysteria2/tuic behind the with_quic build tag, which the
+   engine's builds enable by default).
 9. **System stack or gvisor** — the engine can run on the host network stack
    or on a userspace gvisor netstack for layer 2/3/4 functions.
 10. **Dynamic providers** — a plugin can act as a *provider*: a dynamic source

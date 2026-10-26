@@ -77,10 +77,12 @@ jobs:
           fi
 
       - name: Build
-        run: go build ./...
+        # with_quic compiles sing-box's QUIC outbounds (hysteria/hysteria2/
+        # tuic) into the binary the engine ships; see the Makefile's GO_TAGS.
+        run: go build -tags with_quic ./...
 
       - name: Test
-        run: go test ./internal/api/...
+        run: go test -tags with_quic ./internal/api/...
 
   push-sdk:
     # Generate the TS SDK from this commit's spec and push the result to

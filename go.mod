@@ -46,7 +46,6 @@ require (
 	github.com/go-chi/chi/v5 v5.2.5 // indirect
 	github.com/go-chi/render v1.0.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
-	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/go4org/hashtriemap v0.0.0-20251130024219-545ba229f689 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
@@ -124,7 +123,6 @@ require (
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/mroth/weightedrand/v2 v2.1.0 // indirect
 	github.com/oasisprotocol/deoxysii v0.0.0-20220228165953-2091330c22b7 // indirect
-	github.com/onsi/ginkgo/v2 v2.12.0 // indirect
 	github.com/openacid/low v0.1.21 // indirect
 	github.com/openai/openai-go/v3 v3.26.0 // indirect
 	github.com/openrung/openrung/brokerapi v0.0.0 // indirect
@@ -219,7 +217,7 @@ require (
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/term v0.46.0 // indirect
+	golang.org/x/term v0.47.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/grpc v1.79.1 // indirect
@@ -241,7 +239,7 @@ require (
 	github.com/Psiphon-Labs/pion-ice/v4 v4.0.0-20260423180031-37d6e92d021f // indirect
 	github.com/Psiphon-Labs/pion-webrtc/v4 v4.0.0-20260423180049-7ff453f9681a // indirect
 	github.com/Psiphon-Labs/psiphon-tls v0.0.0-20260612202619-4944f00a8304 // indirect
-	github.com/Psiphon-Labs/psiphon-tunnel-core v0.0.0 // indirect
+	github.com/Psiphon-Labs/psiphon-tunnel-core v2.0.28+incompatible // indirect
 	github.com/Psiphon-Labs/quic-go v0.0.0-20250527153145-79fe45fb83b1 // indirect
 	github.com/Psiphon-Labs/utls v1.1.1-0.20260729134728-7a1fc711853d // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
@@ -265,7 +263,7 @@ require (
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/btree v1.1.3 // indirect
-	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8 // indirect
+	github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/goose-network/goose-plugin-mihomo v0.0.0
 	github.com/goose-network/goose-plugin-singbox v0.0.0
@@ -316,18 +314,18 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib v1.5.0 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
-	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect
+	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/time v0.16.0 // indirect
+	golang.org/x/tools v0.52.0 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20230325221338-052af4a8072b // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	tailscale.com v1.58.2 // indirect
 )
 
@@ -345,7 +343,7 @@ replace github.com/metacubex/mihomo => ../mihomo
 
 replace github.com/sagernet/sing-box => ../sing-box
 
-replace github.com/quic-go/qpack => github.com/quic-go/qpack v0.4.0
+replace github.com/Psiphon-Labs/quic-go => github.com/goose-network/psiphon-quic-go v0.0.0-20261026053528-9822823f4fad
 
 replace github.com/geph-official/geph5-go => ../geph5-go
 

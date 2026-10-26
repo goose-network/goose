@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Re-point goose's local replace directives (../sibling repos) at the
 # published GitHub repositories, pinned to the exact revisions the local
-# tree was tested against. CI runs this before building (the sibling
-# checkouts do not exist on a runner); the Dockerfile carries the same pins
-# as ARGs. Keep the pins here and there in sync — the versions are the
-# local HEADs of the sibling repos at the time of the last green build.
+# tree was tested against. CI and the Dockerfile both run this script, so
+# the pins live in exactly one place; keep them at the local HEADs of the
+# sibling repos at the time of the last green build.
 #
 # OpenRung-go is a private repository: callers must pass its access token
 # (a GitHub PAT with repo read) via GOSE_GITHUB_TOKEN (or GITHUB_TOKEN);
@@ -27,7 +26,8 @@ pins=(
   github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20261026035124-19d8fa59172d
   github.com/Psiphon-Labs/psiphon-tunnel-core=github.com/goose-network/psiphon-tunnel-core@v0.0.0-20260923221754-213987d32b71
   github.com/goose-network/goose-plugin-mihomo=github.com/goose-network/goose-plugin-mihomo@v0.0.0-20261015113701-b4a0a13af363
-  github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261008003930-ac2ef3022d4f
+  github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261026061616-a174fc95b10f
+  github.com/Psiphon-Labs/quic-go=github.com/goose-network/psiphon-quic-go@v0.0.0-20261026053528-9822823f4fad
   github.com/metacubex/mihomo=github.com/metacubex/mihomo@v0.0.0-20260922124647-afe94dafef8c
   github.com/sagernet/sing-box=github.com/sagernet/sing-box@v0.0.0-20260922113237-e5e705ed802d
   github.com/geph-official/geph5-go=github.com/goose-network/geph5-go@v0.0.0-20261024111313-8c6ac2fbe21d
@@ -43,6 +43,7 @@ declare -A sibling_dir=(
   [github.com/Psiphon-Labs/psiphon-tunnel-core]=psiphon-tunnel-core
   [github.com/goose-network/goose-plugin-mihomo]=mihomo-plugin
   [github.com/goose-network/goose-plugin-singbox]=singbox-plugin
+  [github.com/Psiphon-Labs/quic-go]=psiphon-quic-go
   [github.com/metacubex/mihomo]=mihomo
   [github.com/sagernet/sing-box]=sing-box
   [github.com/geph-official/geph5-go]=geph5-go

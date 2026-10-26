@@ -56,7 +56,7 @@ RUN --mount=type=cache,sharing=locked,id=modcache-${TARGETOS}-${TARGETARCH},targ
     fi; \
     scripts/pin-replacements.sh --tidy && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -o /out/goose ./cmd/goose && \
+    go build -trimpath -tags with_quic -o /out/goose ./cmd/goose && \
     mkdir -p /out/state
 
 FROM gcr.io/distroless/static-debian12:nonroot
