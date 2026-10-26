@@ -5,11 +5,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
+	"io/fs"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	_ "github.com/goose-network/goose/include" // register built-in outbound plugins
 	"github.com/goose-network/goose/internal/config"
@@ -24,10 +27,24 @@ func main() {
 	flag.Parse()
 	log.Printf("goose: registered outbound protocols: %v", plugin.Registered())
 
+	// The engine's config is durable: every edit made through the admin API
+	// is written back to this file and reloaded on the next start. An
+	// explicit -config wins; otherwise GOOSE_PERSIST_PATH, else goose.json
+	// beside the default goose.db. A missing explicit -config is fatal; the
+	// implicit default simply starts fresh and is created on the first write.
+	explicitConfig := cfgPath != ""
+	persistPath := cfgPath
+	if persistPath == "" {
+		persistPath = os.Getenv("GOOSE_PERSIST_PATH")
+		if persistPath == "" {
+			persistPath = "goose.json"
+		}
+	}
+
 	store := config.NewStore()
-	if cfgPath != "" {
-		if err := loadConfig(store, cfgPath); err != nil {
-			log.Fatalf("goose: load config %s: %v", cfgPath, err)
+	if err := loadConfig(store, persistPath); err != nil {
+		if explicitConfig || !errors.Is(err, fs.ErrNotExist) {
+			log.Fatalf("goose: load config %s: %v", persistPath, err)
 		}
 	}
 	// A fresh deployment (no providers in the loaded config — the docker
@@ -39,6 +56,13 @@ func main() {
 		log.Printf("goose: no providers configured; seeded the plugin-declared default provider (set GOOSE_NO_DEFAULT_PROVIDER=1 to disable)")
 	}
 
+	// Write through: persist API edits (and the startup state above) to
+	// persistPath. Failures only log — an unwritable path must not take the
+	// engine down — and Stop performs a final flush so a shutdown right
+	// after an edit is not lost to the debounce window.
+	persister := config.NewPersister(store, persistPath)
+	go persister.Run(2 * time.Second)
+
 	eng, err := engine.New(store)
 	if err != nil {
 		log.Fatalf("goose: start engine: %v", err)
@@ -46,13 +70,14 @@ func main() {
 	if err := eng.StartAPI(); err != nil {
 		log.Fatalf("goose: start api: %v", err)
 	}
-	log.Printf("goose engine running; admin API on %s", store.Engine().API.Listen)
+	log.Printf("goose engine running; admin API on %s; config persisted to %s", store.Engine().API.Listen, persistPath)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Printf("goose: shutting down")
 	_ = eng.Close()
+	persister.Stop()
 }
 
 // loadConfig loads a JSON config file describing the engine + inbounds +
@@ -62,7 +87,7 @@ func loadConfig(store *config.Store, path string) error {
 	if err != nil {
 		return err
 	}
-	var doc configDoc
+	var doc config.Doc
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return err
 	}
@@ -83,14 +108,4 @@ func loadConfig(store *config.Store, path string) error {
 		store.SetProvider(p)
 	}
 	return nil
-}
-
-// configDoc is the on-disk config shape.
-type configDoc struct {
-	Engine    config.Engine          `json:"engine"`
-	Inbounds  []*config.Inbound      `json:"inbounds"`
-	Outbounds []*config.OutboundSpec `json:"outbounds"`
-	Pools     []*config.Pool         `json:"pools"`
-	Chains    []*config.ChainSpec    `json:"chains"`
-	Providers []*config.ProviderSpec `json:"providers"`
 }
