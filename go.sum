@@ -237,6 +237,8 @@ github.com/goose-network/psiphon-quic-go v0.0.0-20261026053528-9822823f4fad h1:o
 github.com/goose-network/psiphon-quic-go v0.0.0-20261026053528-9822823f4fad/go.mod h1:TCA3X2AQsRwBzsUgknbeSPm8tGCaIzSnq9JK1cyM25E=
 github.com/goose-network/tor-go v0.0.4 h1:qGGqON8ZZ/QRCVPxABWTNxn2g8IOvK3GIJmRr6bToQc=
 github.com/goose-network/tor-go v0.0.4/go.mod h1:1PnvAg7x1z2nY9tqxNNlfeUJDXGMC3Vrdy44mRvKltc=
+github.com/goose-network/tor-go v0.0.5 h1:5xAyK9WgBw4g/yV/1t+WbLQE+vBzTFDVyhDXZM0gbZQ=
+github.com/goose-network/tor-go v0.0.5/go.mod h1:1PnvAg7x1z2nY9tqxNNlfeUJDXGMC3Vrdy44mRvKltc=
 github.com/grafov/m3u8 v0.0.0-20171211212457-6ab8f28ed427 h1:xh96CCAZTX8LJPFoOVRgTwZbn2DvJl8fyCyivohhSIg=
 github.com/grafov/m3u8 v0.0.0-20171211212457-6ab8f28ed427/go.mod h1:PdjzaU/pJUo4jTIn2rcgMFs+HqBGl/sPJLr8BI0Xq/I=
 github.com/hashicorp/golang-lru v1.0.2 h1:dV3g9Z/unq5DpblPpw+Oqcv4dU/1omnb4Ok8iPY6p1c=
