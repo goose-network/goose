@@ -33,6 +33,13 @@ The image is distroless (static, nonroot). With no `-config` argument the
 engine starts with empty defaults and is configured through the admin API.
 State (the metrics bbolt DB) lives in `/data`.
 
+**Configuration is durable**: every edit made through the admin API is
+written back to the config file the engine was started with — `-config`
+when given, else `GOOSE_PERSIST_PATH`, else `goose.json` in the working
+directory (loaded on the next start when present) — so API edits survive
+a restart. Provider-managed state (the outbounds and pool membership a
+provider's polls regenerate) is exempt: only operator objects persist.
+
 A fresh deployment — no `-config`, and nothing yet configured through the
 admin API — seeds the **plugin-declared default provider**: the zero-config
 Psiphon plugin declares itself the default, so the engine starts it
@@ -70,7 +77,10 @@ authenticated git BuildKit secret.
 ```
 
 Config is a JSON document with `engine`, `inbounds`, `outbounds`, `pools`,
-`chains`, and `providers` (all optional). Example — a SOCKS5 inbound whose
+`chains`, and `providers` (all optional). The engine writes the document
+back on every change — its own startup state plus any edit made through
+the admin API — atomically (temp file + rename), debounced and skipped
+when nothing persistable changed. Example — a SOCKS5 inbound whose
 pool is populated dynamically by the Psiphon provider, here with no config at
 all (the plugin's embedded production defaults auto-retrieve the signed
 server list):
