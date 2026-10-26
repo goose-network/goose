@@ -338,6 +338,13 @@ type Store struct {
 	// (adding new, removing stale) without touching user-configured static
 	// outbounds. Keyed by provider ID.
 	managedOutbounds map[string]map[string]struct{}
+	// managedPools records pool IDs a provider feeds (created or adopted by
+	// SetProviderOutbounds). It scopes SetProviderOutbounds' rebuild/delete
+	// pool here is rebuilt from provider output and deleted when unfed. A
+	// pool NOT here is the operator's — it may reference provider-owned
+	// outbound IDs, but its membership is the operator's choice and a
+	// provider poll must neither rewrite nor drop it.
+	managedPools map[string]struct{}
 	// version is bumped on every mutation; subscribers use it to detect
 	// changes and reconcile.
 	version uint64
@@ -363,6 +370,7 @@ func NewStore() *Store {
 		chains:           map[string]*ChainSpec{},
 		providers:        map[string]*ProviderSpec{},
 		managedOutbounds: map[string]map[string]struct{}{},
+		managedPools:     map[string]struct{}{},
 	}
 }
 
@@ -469,6 +477,12 @@ func (s *Store) Pool(id string) (*Pool, bool) {
 func (s *Store) SetPool(p *Pool) {
 	s.mu.Lock()
 	s.pools[p.ID] = p
+	// An explicit operator write un-adopts the pool from provider
+	// management, whatever created it: the operator owns its membership
+	// now, so later provider polls rebuild around it rather than through
+	// it. (The next poll that re-targets the pool from a provider spec
+	// re-adopts it, as rebuildProviderPoolLocked records again.)
+	delete(s.managedPools, p.ID)
 	s.bumpLocked()
 	s.mu.Unlock()
 }
@@ -479,6 +493,7 @@ func (s *Store) DeletePool(id string) bool {
 		return false
 	}
 	delete(s.pools, id)
+	delete(s.managedPools, id)
 	s.bumpLocked()
 	return true
 }
@@ -557,6 +572,7 @@ func (s *Store) DeleteProvider(id string) bool {
 	for _, poolID := range spec.EffectivePoolIDs() {
 		if !s.providerFeedsPoolLocked(poolID) {
 			delete(s.pools, poolID)
+			delete(s.managedPools, poolID)
 			continue
 		}
 		s.rebuildProviderPoolLocked(poolID)
@@ -647,6 +663,10 @@ func (s *Store) SetProviderOutbounds(providerID string, specs []*OutboundSpec) {
 	// unions in every OTHER provider still aimed at the same pool, so two
 	// providers sharing a pool (e.g. two subscriptions both landing in
 	// "default") accumulate instead of clobbering each other on each poll.
+	// Every pool built here becomes provider-managed: it is rebuilt from
+	// provider output on later polls and deleted when no provider feeds it
+	// anymore. A pre-existing operator pool targeted by a provider spec is
+	// adopted (its filters/selector/access survive rebuildProviderPoolLocked).
 	fed := make(map[string]struct{}, len(poolIDs))
 	for _, poolID := range poolIDs {
 		fed[poolID] = struct{}{}
@@ -654,10 +674,18 @@ func (s *Store) SetProviderOutbounds(providerID string, specs []*OutboundSpec) {
 	}
 	// Pools that reference this provider's outbounds but are no longer in
 	// its pool list: rebuild without it, or delete when unfed.
-	for _, poolID := range s.fedPoolsLocked(providerID) {
+	// This walks the provider-managed pools only: fedPoolsLocked-style
+	// membership (a pool references a managed outbound) is NOT ownership.
+	// The operator may hand-build a pool pinning a provider-owned outbound
+	// (e.g. one pool that routes through the provider's general outbound);
+	// a provider poll must leave such pools alone, or the outbound's pool
+	// would vanish at the next poll and the policy referencing it would
+	// silently degrade to the all-outbounds fallback.
+	for poolID := range s.managedPools {
 		if _, keep := fed[poolID]; keep {
 			continue
 		}
+		delete(s.managedPools, poolID)
 		if !s.providerFeedsPoolLocked(poolID) {
 			delete(s.pools, poolID)
 			continue
@@ -666,23 +694,6 @@ func (s *Store) SetProviderOutbounds(providerID string, specs []*OutboundSpec) {
 	}
 
 	s.bumpLocked()
-}
-
-// fedPoolsLocked returns the pools that reference any of providerID's managed
-// outbounds — the pools it actually feeds even if the spec was just edited.
-// Caller holds s.mu.
-func (s *Store) fedPoolsLocked(providerID string) []string {
-	owned := s.managedOutbounds[providerID]
-	var pools []string
-	for poolID, pool := range s.pools {
-		for _, id := range pool.OutboundIDs {
-			if _, mine := owned[id]; mine {
-				pools = append(pools, poolID)
-				break
-			}
-		}
-	}
-	return pools
 }
 
 // rebuildProviderPoolLocked recomputes pool poolID as the union of every
@@ -723,6 +734,11 @@ func (s *Store) rebuildProviderPoolLocked(poolID string) {
 		ID:          poolID,
 		OutboundIDs: ids,
 	}
+	// The pool is provider-managed from here on: later polls rebuild it and
+	// delete it when unfed. rebuildProviderPoolLocked runs only for pools a
+	// provider feeds (its spec names the pool, or another provider's does),
+	// so it never adopts an operator-built pool.
+	s.managedPools[poolID] = struct{}{}
 	if existing, ok := s.pools[poolID]; ok {
 		// keep user-configured filters/selector/access; if the pool is
 		// brand-new and has no selector, the router falls back to a
