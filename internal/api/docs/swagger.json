@@ -9,7 +9,7 @@
     "paths": {
         "/api/chains": {
             "get": {
-                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
+                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector) or a single outbound server (pinned for that hop; when an id matches both, the pool wins). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
                 "consumes": [
                     "application/json"
                 ],
@@ -73,7 +73,7 @@
                 }
             },
             "post": {
-                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
+                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector) or a single outbound server (pinned for that hop; when an id matches both, the pool wins). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
                 "consumes": [
                     "application/json"
                 ],
@@ -162,7 +162,7 @@
         },
         "/api/chains/{id}": {
             "get": {
-                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
+                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector) or a single outbound server (pinned for that hop; when an id matches both, the pool wins). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
                 "consumes": [
                     "application/json"
                 ],
@@ -246,7 +246,7 @@
                 }
             },
             "delete": {
-                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
+                "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector) or a single outbound server (pinned for that hop; when an id matches both, the pool wins). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
                 "consumes": [
                     "application/json"
                 ],
@@ -438,7 +438,7 @@
         },
         "/api/inbounds": {
             "get": {
-                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to a named chain (chain_id), one pinned outbound server (outbound_id), or a single pool (pool_id, optionally narrowed by filters) — in that order of preference; when none is set, any available outbound. A user policy that sets any route field replaces the inbound's route as a group, and user filters are the user's own (replacing the inbound-level ones). Filters narrow every layer of a named chain too. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -502,7 +502,7 @@
                 }
             },
             "post": {
-                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to a named chain (chain_id), one pinned outbound server (outbound_id), or a single pool (pool_id, optionally narrowed by filters) — in that order of preference; when none is set, any available outbound. A user policy that sets any route field replaces the inbound's route as a group, and user filters are the user's own (replacing the inbound-level ones). Filters narrow every layer of a named chain too. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -568,7 +568,7 @@
         },
         "/api/inbounds/{id}": {
             "get": {
-                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to a named chain (chain_id), one pinned outbound server (outbound_id), or a single pool (pool_id, optionally narrowed by filters) — in that order of preference; when none is set, any available outbound. A user policy that sets any route field replaces the inbound's route as a group, and user filters are the user's own (replacing the inbound-level ones). Filters narrow every layer of a named chain too. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -652,7 +652,7 @@
                 }
             },
             "delete": {
-                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
+                "description": "Returns all configured inbound listeners.\nReturns the inbound listener with the given id.\nCreates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to a named chain (chain_id), one pinned outbound server (outbound_id), or a single pool (pool_id, optionally narrowed by filters) — in that order of preference; when none is set, any available outbound. A user policy that sets any route field replaces the inbound's route as a group, and user filters are the user's own (replacing the inbound-level ones). Filters narrow every layer of a named chain too. Changes apply live: the engine starts/stops listeners on the next config version bump.\nRemoves the inbound listener with the given id and stops it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1769,7 +1769,7 @@
                     "type": "string"
                 },
                 "layers": {
-                    "description": "PoolIDs, in order",
+                    "description": "pool or outbound IDs, in order",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -1907,14 +1907,18 @@
                     "type": "string"
                 },
                 "filters": {
-                    "description": "Filters narrow the pool's candidates for this inbound only (same\nFilterSpec shape as a pool's filters). Applied on top of the pool's own\nfilters when PoolID routing is used; ignored for ChainID routing.",
+                    "description": "Filters narrow the route's candidates for this inbound or user only\n(same FilterSpec shape as a pool's filters). With pool routing they\napply on top of the pool's own filters; with chain routing they narrow\nevery layer's pool. A user's filters replace the inbound-level ones.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/config.FilterSpec"
                     }
                 },
+                "outbound_id": {
+                    "description": "OutboundID references one Outbound to route through directly,\npinning this inbound (or user) to a single server. Takes precedence\nover PoolID, but not over ChainID.",
+                    "type": "string"
+                },
                 "pool_id": {
-                    "description": "PoolID references a Pool to route through directly, without needing a\nnamed chain. Ignored when ChainID is set.",
+                    "description": "PoolID references a Pool to route through directly, without needing a\nnamed chain. Ignored when ChainID or OutboundID is set.",
                     "type": "string"
                 }
             }
@@ -2009,7 +2013,7 @@
                     "type": "string"
                 },
                 "policy": {
-                    "description": "Policy overrides the inbound-level policy for this user. Empty fields\nfall back to the inbound-level policy.",
+                    "description": "Policy overrides the inbound-level policy for this user. Route fields\n(chain_id / outbound_id / pool_id) are replaced as a group when the\nuser policy sets any of them, otherwise the inbound's route is\ninherited. Filters are the user's own: when present they replace the\ninbound-level filters, so each user can be narrowed independently.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/config.InboundPolicy"

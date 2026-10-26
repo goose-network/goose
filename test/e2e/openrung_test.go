@@ -110,7 +110,7 @@ func TestE2E_OpenRungProviderRealNetwork(t *testing.T) {
 		Listen: fmt.Sprintf("127.0.0.1:%d", port),
 		Users:  []config.User{{Username: "app", Password: "secret"}},
 		Policy: config.InboundPolicy{
-			PoolIDs: []string{config.DefaultPoolID},
+			PoolID:  config.DefaultPoolID,
 			Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []string{"mihomo-vless"}}}},
 		},
 	})

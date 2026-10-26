@@ -166,6 +166,34 @@ blank import in `include/register.go`.
   signal triggers a refresh that adds/removes outbounds, and a provider
   error does not drain the pool or crash the manager.
 
+## Inbound policy and routing
+
+An `InboundPolicy` binds a route to an inbound or to one user of an inbound.
+The route is one of, in resolution order (an unresolvable reference falls
+through to the next):
+
+1. `chain_id` — a named chain from the chain store;
+2. `outbound_id` — one specific outbound server, pinned;
+3. `pool_id` — a single pool layer;
+4. none set — any available outbound (shared fallback selector).
+
+`filters` are not part of the route choice: they narrow whichever route
+resolved — on top of a pool's own filters, and on *every* layer of a named
+chain.
+
+**Per-user policies.** Each user on a port can carry their own policy. Route
+fields are replaced *as a group*: a user policy that sets any of
+`chain_id` / `outbound_id` / `pool_id` ignores the inbound's route entirely;
+one that sets none inherits it. Filters are the user's own either way — a
+user policy with filters replaces the inbound-level filters (per-user
+narrowing), while other users keep theirs. Routes are resolved into
+dialable chains at rebuild time, so dispatch is a map lookup.
+
+**Chain layers.** A chain layer references either a pool (which carries its
+own filters + selector) or a single outbound server, pinned for that hop —
+so a chain can mix pool hops and fixed servers. When a layer id matches
+both a pool and an outbound, the pool wins.
+
 ## Dynamic providers
 
 A *provider* is a plugin that sources its own proxy servers and feeds them

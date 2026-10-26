@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,13 +68,15 @@ type policyResolver struct {
 }
 
 type inboundPolicy struct {
-	defaultChain string
-	users        map[string]string // user -> chainID
-	// defaultRoute is the policy-level pool route (pool + per-inbound
-	// filters) synthesized into a single-layer chain when no chain_id is
-	// configured. Prebuilt at rebuild time so dispatch stays a map lookup.
-	defaultRoute core.Chain
-	// userRoutes is per-user pool routes, same shape as defaultRoute.
+	// route is the inbound's default route fully resolved at rebuild time:
+	// a named chain (with the policy's filters narrowing every layer), a
+	// pinned outbound server, or a single-layer pool route. nil means no
+	// route: dispatch falls back to the shared all-outbounds selector.
+	route core.Chain
+	// userRoutes is each user's fully resolved route, built by merging the
+	// user's policy over the inbound's (route fields replace as a group;
+	// the user's filters replace the inbound's). Present for every user
+	// with a policy, possibly nil — nil defers to route at dispatch.
 	userRoutes map[string]core.Chain
 }
 
@@ -166,25 +169,30 @@ func (r *Router) rebuild() {
 		bp.access = p.Access
 		r.pools[p.ID] = bp
 	}
-	// build chains. Each layer's selector is wrapped in a poolSelector that
-	// carries the pool's candidate outbounds, so the router can recover them
-	// at dispatch time without a pool lookup.
+	// build chains. Each layer references either a pool or a single outbound
+	// server (when an ID matches both, the pool wins). Pool layers are
+	// wrapped in a poolSelector that carries the pool's candidates, so the
+	// router can recover them at dispatch time without a pool lookup;
+	// outbound layers pin that one server for the hop.
 	r.chains = map[string]core.Chain{}
 	for _, c := range r.cfg.Chains() {
 		var ch core.Chain
-		for _, pid := range c.Layers {
-			bp, ok := r.pools[pid]
-			if !ok {
-				continue
+		for _, ref := range c.Layers {
+			if bp, ok := r.pools[ref]; ok {
+				sel := bp.selector
+				if sel == nil {
+					sel = &fallbackSelector{}
+				}
+				ch = append(ch, core.ChainLayer{
+					Filters:  bp.filters,
+					Selector: &poolSelector{Selector: sel, poolID: bp.id, pool: bp.outbounds},
+				})
+			} else if o, ok := r.outbounds[ref]; ok {
+				ch = append(ch, core.ChainLayer{
+					Selector: &poolSelector{Selector: &fixedSelector{out: o}, pool: []core.Outbound{o}},
+				})
 			}
-			sel := bp.selector
-			if sel == nil {
-				sel = &fallbackSelector{}
-			}
-			ch = append(ch, core.ChainLayer{
-				Filters:  bp.filters,
-				Selector: &poolSelector{Selector: sel, poolID: bp.id, pool: bp.outbounds},
-			})
+			// unknown references are skipped; the chain keeps its order
 		}
 		r.chains[c.ID] = ch
 	}
@@ -192,23 +200,19 @@ func (r *Router) rebuild() {
 	r.policy = policyResolver{inbounds: map[string]*inboundPolicy{}}
 	for _, in := range r.cfg.Inbounds() {
 		ip := &inboundPolicy{
-			defaultChain: in.Policy.ChainID,
-			users:        map[string]string{},
-			userRoutes:   map[string]core.Chain{},
+			route:      r.resolveRoute(in.Policy),
+			userRoutes: map[string]core.Chain{},
 		}
-		ip.defaultRoute = r.buildRoute(in.Policy)
 		for _, u := range in.Users {
 			if u.Policy == nil {
 				continue
 			}
-			if u.Policy.ChainID != "" {
-				ip.users[u.Username] = u.Policy.ChainID
-			} else if ch := r.buildRoute(*u.Policy); len(ch) > 0 {
-				// A user policy with only pool+filters (no chain) gets its own
-				// single-layer route; otherwise it falls back to the inbound's
-				// default route.
-				ip.userRoutes[u.Username] = ch
-			}
+			// A user policy merges over the inbound's: route fields replace
+			// as a group (set any of them and you own all three), filters
+			// replace the inbound's outright. Store nil when the merged
+			// policy resolves to nothing — dispatch then defers to route.
+			merged := effectivePolicy(in.Policy, u.Policy)
+			ip.userRoutes[u.Username] = r.resolveRoute(merged)
 		}
 		r.policy.inbounds[in.ID] = ip
 	}
@@ -218,11 +222,29 @@ func (r *Router) rebuild() {
 	r.reconcileProberLocked()
 }
 
-// buildRoute synthesizes the single-layer chain for a policy that names a
-// pool instead of a chain: the pool's outbounds as candidates, the pool's
-// own filters plus the policy's filters, and the pool's selector (or the
-// fallback). Returns nil when the policy names no pool.
-func (r *Router) buildRoute(p config.InboundPolicy) core.Chain {
+// resolveRoute materializes a policy into a fully dialable chain: a named
+// chain from the chain store, a single layer pinning one outbound server, or
+// a single-layer pool route — in that order of preference. Policy filters are
+// applied in every case (narrowing each layer of a named chain, or joining
+// the pool's own filters). Returns nil when the policy names nothing
+// resolvable; the caller falls back to the next policy level.
+func (r *Router) resolveRoute(p config.InboundPolicy) core.Chain {
+	var filters []core.Filter
+	for _, fs := range p.Filters {
+		if f, err := filter.New(fs.Type, fs.Params); err == nil {
+			filters = append(filters, f)
+		}
+	}
+	if p.ChainID != "" {
+		if ch, ok := r.chains[p.ChainID]; ok && len(ch) > 0 {
+			return r.chainWithFilters(ch, filters)
+		}
+	}
+	if p.OutboundID != "" {
+		if o, ok := r.outbounds[p.OutboundID]; ok {
+			return core.Chain{{Selector: &poolSelector{Selector: &fixedSelector{out: o}, pool: []core.Outbound{o}}}}
+		}
+	}
 	if p.PoolID == "" {
 		return nil
 	}
@@ -230,42 +252,82 @@ func (r *Router) buildRoute(p config.InboundPolicy) core.Chain {
 	if !ok {
 		return nil
 	}
-	filters := make([]core.Filter, 0, len(bp.filters)+len(p.Filters))
-	filters = append(filters, bp.filters...)
-	for _, fs := range p.Filters {
-		if f, err := filter.New(fs.Type, fs.Params); err == nil {
-			filters = append(filters, f)
-		}
-	}
+	layerFilters := make([]core.Filter, 0, len(bp.filters)+len(filters))
+	layerFilters = append(layerFilters, bp.filters...)
+	layerFilters = append(layerFilters, filters...)
 	sel := core.Selector(bp.selector)
 	if sel == nil {
 		sel = &fallbackSelector{}
 	}
 	return core.Chain{{
-		Filters:  filters,
+		Filters:  layerFilters,
 		Selector: &poolSelector{Selector: sel, poolID: bp.id, pool: bp.outbounds},
 	}}
 }
 
-// resolveChain returns the chain for an inbound+user: a named chain when the
-// policy references one, otherwise the policy's single-layer pool route, and
-// finally the shared all-outbounds fallback if neither is configured.
+// chainWithFilters returns a copy of ch with the given filters appended to
+// every layer's own filters, so an inbound/user policy narrows each hop of a
+// named chain (a pool layer keeps its pool filters, an outbound layer gains
+// the policy filters). The layers' selectors — and their embedded
+// poolSelectors with live candidate slices — are shared, not copied.
+func (r *Router) chainWithFilters(ch core.Chain, filters []core.Filter) core.Chain {
+	if len(filters) == 0 {
+		return ch
+	}
+	out := make(core.Chain, len(ch))
+	for i, layer := range ch {
+		fs := make([]core.Filter, 0, len(layer.Filters)+len(filters))
+		fs = append(fs, layer.Filters...)
+		fs = append(fs, filters...)
+		out[i] = core.ChainLayer{Filters: fs, Selector: layer.Selector}
+	}
+	return out
+}
+
+// effectivePolicy merges a user policy over the inbound-level policy. Route
+// fields (chain_id / outbound_id / pool_id) are replaced as a group: if the
+// user policy sets any of them, the user's trio wins wholesale; otherwise the
+// inbound's route is inherited. Filters are not a route field — a user policy
+// with filters always replaces the inbound's filters (that is the point of
+// per-user filters), even when the route itself is inherited.
+func effectivePolicy(base config.InboundPolicy, over *config.InboundPolicy) config.InboundPolicy {
+	if over == nil {
+		return base
+	}
+	p := config.InboundPolicy{Filters: base.Filters}
+	if over.ChainID != "" || over.OutboundID != "" || over.PoolID != "" {
+		p.ChainID, p.OutboundID, p.PoolID = over.ChainID, over.OutboundID, over.PoolID
+	} else {
+		p.ChainID, p.OutboundID, p.PoolID = base.ChainID, base.OutboundID, base.PoolID
+	}
+	if len(over.Filters) > 0 {
+		p.Filters = over.Filters
+	}
+	return p
+}
+
+// fixedSelector always picks its one pinned outbound; used for chain hops
+// and policies that reference a specific server instead of a pool.
+type fixedSelector struct{ out core.Outbound }
+
+func (*fixedSelector) Name() string { return "fixed" }
+
+func (s *fixedSelector) Pick(_ []core.Outbound, _ core.Metadata) (core.Outbound, error) {
+	return s.out, nil
+}
+
+// resolveChain returns the chain for an inbound+user: the user's resolved
+// route, else the inbound's, else the shared all-outbounds fallback. Routes
+// are fully precomputed at rebuild time; this only picks between them.
 func (r *Router) resolveChain(inboundID, user string) core.Chain {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if ip, ok := r.policy.inbounds[inboundID]; ok {
-		chainID := ip.defaultChain
-		if c, ok := ip.users[user]; ok && c != "" {
-			chainID = c
-		}
-		if ch, ok := r.chains[chainID]; ok && len(ch) > 0 {
-			return ch
-		}
 		if ch, ok := ip.userRoutes[user]; ok && len(ch) > 0 {
 			return ch
 		}
-		if len(ip.defaultRoute) > 0 {
-			return ip.defaultRoute
+		if len(ip.route) > 0 {
+			return ip.route
 		}
 	}
 	// fallback: a single layer that picks any available outbound.
@@ -520,10 +582,18 @@ func (r *Router) layerPool(layer core.ChainLayer) []core.Outbound {
 	if ps, ok := layer.Selector.(*poolSelector); ok {
 		return ps.pool
 	}
-	// fallback chain (no explicit pool): use all built outbounds.
+	// fallback chain (no explicit pool): use all built outbounds. Sorted by
+	// id so the shared fallback selector's round-robin counter produces a
+	// stable rotation — map iteration order is random per call, which would
+	// scramble which outbound each consecutive pick lands on.
 	all := make([]core.Outbound, 0, len(r.outbounds))
-	for _, o := range r.outbounds {
-		all = append(all, o)
+	ids := make([]string, 0, len(r.outbounds))
+	for id := range r.outbounds {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		all = append(all, r.outbounds[id])
 	}
 	return all
 }

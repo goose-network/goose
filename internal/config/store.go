@@ -57,28 +57,41 @@ type Inbound struct {
 type User struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
-	// Policy overrides the inbound-level policy for this user. Empty fields
-	// fall back to the inbound-level policy.
+	// Policy overrides the inbound-level policy for this user. Route fields
+	// (chain_id / outbound_id / pool_id) are replaced as a group when the
+	// user policy sets any of them, otherwise the inbound's route is
+	// inherited. Filters are the user's own: when present they replace the
+	// inbound-level filters, so each user can be narrowed independently.
 	Policy *InboundPolicy `json:"policy,omitempty"`
 }
 
 // InboundPolicy binds a route to an inbound or user. A route is one of:
 //
-//   - ChainID: a named chain (ordered pool layers) from the chain store;
+//   - ChainID: a named chain (ordered pool/outbound layers) from the chain
+//     store;
+//   - OutboundID: one specific outbound server, pinned;
 //   - PoolID + Filters: a single pool layer, with optional filters that
-//     further narrow the pool for this inbound only (no chain needed);
-//   - neither: the engine falls back to picking any available outbound.
+//     further narrow the pool;
+//   - none of them: the engine falls back to picking any available outbound.
 //
-// When both ChainID and PoolID are set, ChainID wins.
+// Resolution order when several are set: ChainID, then OutboundID, then
+// PoolID; an unresolvable reference (e.g. a missing chain) falls through to
+// the next. Filters apply no matter which route resolved: they narrow every
+// layer of a named chain as well as a pool's candidates.
 type InboundPolicy struct {
 	// ChainID references a Chain in the chain store.
 	ChainID string `json:"chain_id"`
+	// OutboundID references one Outbound to route through directly,
+	// pinning this inbound (or user) to a single server. Takes precedence
+	// over PoolID, but not over ChainID.
+	OutboundID string `json:"outbound_id"`
 	// PoolID references a Pool to route through directly, without needing a
-	// named chain. Ignored when ChainID is set.
+	// named chain. Ignored when ChainID or OutboundID is set.
 	PoolID string `json:"pool_id"`
-	// Filters narrow the pool's candidates for this inbound only (same
-	// FilterSpec shape as a pool's filters). Applied on top of the pool's own
-	// filters when PoolID routing is used; ignored for ChainID routing.
+	// Filters narrow the route's candidates for this inbound or user only
+	// (same FilterSpec shape as a pool's filters). With pool routing they
+	// apply on top of the pool's own filters; with chain routing they narrow
+	// every layer's pool. A user's filters replace the inbound-level ones.
 	Filters []FilterSpec `json:"filters"`
 }
 
@@ -196,11 +209,13 @@ type SelectorSpec struct {
 	Params map[string]any `json:"params"`
 }
 
-// ChainSpec is the config form of a proxy chain: an ordered list of layers,
-// each referencing a pool (which carries its own filters + selector).
+// ChainSpec is the config form of a proxy chain: an ordered list of layers.
+// A layer references either a pool (which carries its own filters +
+// selector) or a single outbound server (pinned for that hop). When an ID
+// matches both a pool and an outbound, the pool wins.
 type ChainSpec struct {
 	ID     string   `json:"id"`
-	Layers []string `json:"layers"` // PoolIDs, in order
+	Layers []string `json:"layers"` // pool or outbound IDs, in order
 }
 
 // DefaultPoolID is the managed pool providers populate when their spec does

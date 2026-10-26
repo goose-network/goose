@@ -209,7 +209,7 @@ func inboundSignature(in *config.Inbound) string {
 	for _, u := range in.Users {
 		fmt.Fprintf(&b, "%s=%s:%s|", u.Username, u.Password, userChain(u.Policy))
 	}
-	fmt.Fprintf(&b, "chain=%s;pool=%s;filters=%s", in.Policy.ChainID, in.Policy.PoolID, policyFilters(in.Policy.Filters))
+	fmt.Fprintf(&b, "chain=%s;outbound=%s;pool=%s;filters=%s", in.Policy.ChainID, in.Policy.OutboundID, in.Policy.PoolID, policyFilters(in.Policy.Filters))
 	return b.String()
 }
 
@@ -217,7 +217,7 @@ func userChain(p *config.InboundPolicy) string {
 	if p == nil {
 		return ""
 	}
-	return fmt.Sprintf("%s/%s/%s", p.ChainID, p.PoolID, policyFilters(p.Filters))
+	return fmt.Sprintf("%s/%s/%s/%s", p.ChainID, p.OutboundID, p.PoolID, policyFilters(p.Filters))
 }
 
 // policyFilters renders filter specs into the signature so adding/removing

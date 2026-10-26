@@ -386,3 +386,266 @@ func TestResolveChainUserPoolPolicy(t *testing.T) {
 	conn.Close()
 	assert.Equal(t, "vip", chain[0])
 }
+
+// TestResolveChainUserPoolOverridesInboundChain pins the group-replacement
+// semantics: a user policy that sets a pool_id REPLACES the inbound's route
+// as a group, so it wins over the inbound's chain_id. (The old resolver let
+// a valid inbound chain_id silently beat a user pool policy — the quirk
+// goal 3 fixes.)
+func TestResolveChainUserPoolOverridesInboundChain(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "chain-hop", Protocol: "testdirect", Config: map[string]any{"id": "chain-hop"}},
+			{ID: "vip", Protocol: "testdirect", Config: map[string]any{"id": "vip"}},
+		},
+		[]*config.Pool{
+			{ID: "pool-chain", OutboundIDs: []string{"chain-hop"}},
+			{ID: "pool-vip", OutboundIDs: []string{"vip"}},
+		},
+		[]*config.ChainSpec{{ID: "c1", Layers: []string{"pool-chain"}}},
+		[]*config.Inbound{{
+			ID:       "in",
+			Protocol: "http",
+			Listen:   "127.0.0.1:0",
+			Policy:   config.InboundPolicy{ChainID: "c1"},
+			Users: []config.User{{
+				Username: "alice",
+				Password: "pw",
+				Policy:   &config.InboundPolicy{PoolID: "pool-vip"},
+			}},
+		}},
+	)
+	meta := metaFor("in", "example.com", "80")
+	conn, chain, err := r.Dial(context.Background(), meta)
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "chain-hop", chain[0], "anonymous traffic follows the inbound chain")
+
+	meta = metaFor("in", "example.com", "80")
+	meta.User = "alice"
+	conn, chain, err = r.Dial(context.Background(), meta)
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "vip", chain[0], "user pool policy must override the inbound chain (group replacement)")
+}
+
+// TestResolveChainOutboundPolicy verifies goal 3's server-level routing: a
+// policy that names outbound_id pins every connection to that one server,
+// even though pools with other members exist.
+func TestResolveChainOutboundPolicy(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "pinned", Protocol: "testdirect", Config: map[string]any{"id": "pinned"}},
+			{ID: "other", Protocol: "testdirect", Config: map[string]any{"id": "other"}},
+		},
+		[]*config.Pool{{ID: "mypool", OutboundIDs: []string{"other"}}},
+		nil,
+		[]*config.Inbound{{
+			ID:       "in",
+			Protocol: "http",
+			Listen:   "127.0.0.1:0",
+			Policy:   config.InboundPolicy{OutboundID: "pinned"},
+		}},
+	)
+	for i := 0; i < 3; i++ {
+		conn, chain, err := r.Dial(context.Background(), metaFor("in", "example.com", "80"))
+		require.NoError(t, err)
+		conn.Close()
+		assert.Equal(t, []string{"pinned"}, chain, "outbound_id must pin the route to that server")
+	}
+}
+
+// TestResolveChainUserOutboundPolicy verifies per-user server pinning: the
+// user's outbound_id replaces the inbound's pool route (route fields are
+// replaced as a group), while anonymous traffic keeps the pool.
+func TestResolveChainUserOutboundPolicy(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "shared", Protocol: "testdirect", Config: map[string]any{"id": "shared"}},
+			{ID: "vip-server", Protocol: "testdirect", Config: map[string]any{"id": "vip-server"}},
+		},
+		[]*config.Pool{{ID: "pool-default", OutboundIDs: []string{"shared"}}},
+		nil,
+		[]*config.Inbound{{
+			ID:       "in",
+			Protocol: "http",
+			Listen:   "127.0.0.1:0",
+			Policy:   config.InboundPolicy{PoolID: "pool-default"},
+			Users: []config.User{{
+				Username: "alice",
+				Password: "pw",
+				Policy:   &config.InboundPolicy{OutboundID: "vip-server"},
+			}},
+		}},
+	)
+	meta := metaFor("in", "example.com", "80")
+	conn, chain, err := r.Dial(context.Background(), meta)
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "shared", chain[0])
+
+	meta = metaFor("in", "example.com", "80")
+	meta.User = "alice"
+	conn, chain, err = r.Dial(context.Background(), meta)
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "vip-server", chain[0], "user outbound_id must override the inbound pool route")
+}
+
+// TestResolveChainUserFiltersReplaceInboundFilters verifies goal 2: filters
+// are per-user. A user policy carrying only filters inherits the inbound's
+// route but has its OWN filters (replacing, not merging with, the inbound's):
+// alice's filters reject the pool's members while bob's accept them, and
+// anonymous traffic keeps the inbound-level filters.
+func TestResolveChainUserFiltersReplaceInboundFilters(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "only", Protocol: "testdirect", Config: map[string]any{"id": "only"}},
+		},
+		[]*config.Pool{{ID: "mypool", OutboundIDs: []string{"only"}}},
+		nil,
+		[]*config.Inbound{{
+			ID:       "in",
+			Protocol: "http",
+			Listen:   "127.0.0.1:0",
+			Policy: config.InboundPolicy{
+				PoolID:  "mypool",
+				Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []any{"testdirect"}}}},
+			},
+			Users: []config.User{
+				{Username: "alice", Password: "pw", Policy: &config.InboundPolicy{
+					// filters only: inherits the pool route, replaces the filters
+					Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []any{"socks5"}}}},
+				}},
+				{Username: "bob", Password: "pw", Policy: &config.InboundPolicy{
+					Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []any{"testdirect"}}}},
+				}},
+			},
+		}},
+	)
+	meta := metaFor("in", "example.com", "80")
+	conn, chain, err := r.Dial(context.Background(), meta)
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "only", chain[0], "anonymous traffic uses the inbound-level filters")
+
+	meta.User = "alice"
+	_, _, err = r.Dial(context.Background(), meta)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no outbound passed filters", "alice's filters must replace the inbound's")
+
+	meta = metaFor("in", "example.com", "80")
+	meta.User = "bob"
+	conn, chain, err = r.Dial(context.Background(), meta)
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "only", chain[0], "bob's own filters accept the pool member")
+}
+
+// TestResolveChainUserFiltersNarrowEveryChainLayer verifies that per-user
+// filters apply to a NAMED chain, not just pool routes: alice's protocol
+// filter rejects layer 0's candidates so her dial fails, while anonymous
+// traffic traverses both hops.
+func TestResolveChainUserFiltersNarrowEveryChainLayer(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "ob-a", Protocol: "testdirect", Config: map[string]any{"id": "ob-a"}},
+			{ID: "ob-b", Protocol: "testchain", Config: map[string]any{"id": "ob-b"}},
+		},
+		[]*config.Pool{
+			{ID: "pool-a", OutboundIDs: []string{"ob-a"}, Selector: config.SelectorSpec{Type: "random"}},
+			{ID: "pool-b", OutboundIDs: []string{"ob-b"}, Selector: config.SelectorSpec{Type: "random"}},
+		},
+		[]*config.ChainSpec{{ID: "c2", Layers: []string{"pool-a", "pool-b"}}},
+		[]*config.Inbound{{
+			ID:       "in",
+			Protocol: "http",
+			Listen:   "127.0.0.1:0",
+			Policy:   config.InboundPolicy{ChainID: "c2"},
+			Users: []config.User{{
+				Username: "alice",
+				Password: "pw",
+				Policy: &config.InboundPolicy{
+					Filters: []config.FilterSpec{{Type: "protocol", Params: map[string]any{"allow": []any{"socks5"}}}},
+				},
+			}},
+		}},
+	)
+	meta := metaFor("in", "example.com", "80")
+	conn, chain, err := r.Dial(context.Background(), meta)
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, []string{"ob-a", "ob-b"}, chain)
+
+	meta.User = "alice"
+	_, _, err = r.Dial(context.Background(), meta)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no outbound passed filters", "user filters must narrow every layer of the named chain")
+}
+
+// TestChainLayersPinOutboundServers verifies goal 3's chain-level change: a
+// chain layer may name a single outbound server (not just a pool). Both hops
+// are pinned servers; hop 1 is dialed through hop 0's connection.
+func TestChainLayersPinOutboundServers(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "hop0", Protocol: "testchain", Config: map[string]any{"id": "hop0"}},
+			{ID: "hop1", Protocol: "testchain", Config: map[string]any{"id": "hop1"}},
+		},
+		nil,
+		[]*config.ChainSpec{{ID: "c3", Layers: []string{"hop0", "hop1"}}},
+		[]*config.Inbound{inboundOnChain("in", "c3")},
+	)
+	hop1 := unwrap(t, r, "hop1").(*fake.ChainFakeOutbound)
+	hop1.OnDialThrough = func(_ core.Network, _ string, via net.Conn) (net.Conn, error) {
+		require.NotNil(t, via, "hop1 must be dialed through hop0's conn")
+		a, b := net.Pipe()
+		go a.Close()
+		return b, nil
+	}
+	conn, chainIDs, err := r.Dial(context.Background(), metaFor("in", "example.com", "80"))
+	require.NoError(t, err)
+	require.NotNil(t, conn)
+	defer conn.Close()
+	assert.Equal(t, []string{"hop0", "hop1"}, chainIDs, "both pinned hops should be traversed")
+}
+
+// TestResolveChainPolicyPrecedence verifies the documented resolution order
+// chain_id > outbound_id > pool_id, including fall-through when a reference
+// is unresolvable (missing chain, then missing outbound).
+func TestResolveChainPolicyPrecedence(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "ob-a", Protocol: "testdirect", Config: map[string]any{"id": "ob-a"}},
+			{ID: "ob-b", Protocol: "testdirect", Config: map[string]any{"id": "ob-b"}},
+			{ID: "ob-x", Protocol: "testdirect", Config: map[string]any{"id": "ob-x"}},
+		},
+		[]*config.Pool{
+			{ID: "pool-a", OutboundIDs: []string{"ob-a"}},
+			{ID: "pool-b", OutboundIDs: []string{"ob-b"}},
+		},
+		[]*config.ChainSpec{{ID: "c1", Layers: []string{"pool-b"}}},
+		[]*config.Inbound{
+			{ID: "in-all", Protocol: "http", Listen: "127.0.0.1:0",
+				Policy: config.InboundPolicy{ChainID: "c1", OutboundID: "ob-x", PoolID: "pool-a"}},
+			{ID: "in-out", Protocol: "http", Listen: "127.0.0.1:0",
+				Policy: config.InboundPolicy{ChainID: "missing", OutboundID: "ob-x", PoolID: "pool-a"}},
+			{ID: "in-pool", Protocol: "http", Listen: "127.0.0.1:0",
+				Policy: config.InboundPolicy{ChainID: "missing", OutboundID: "missing", PoolID: "pool-a"}},
+		},
+	)
+	conn, chain, err := r.Dial(context.Background(), metaFor("in-all", "example.com", "80"))
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "ob-b", chain[0], "chain_id must beat outbound_id and pool_id")
+
+	conn, chain, err = r.Dial(context.Background(), metaFor("in-out", "example.com", "80"))
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "ob-x", chain[0], "unresolvable chain falls through to outbound_id")
+
+	conn, chain, err = r.Dial(context.Background(), metaFor("in-pool", "example.com", "80"))
+	require.NoError(t, err)
+	conn.Close()
+	assert.Equal(t, "ob-a", chain[0], "unresolvable chain+outbound falls through to pool_id")
+}

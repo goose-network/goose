@@ -256,7 +256,7 @@ func validateEngine(e config.Engine) error {
 // createInbound godoc
 //
 //	@Summary      Create or replace an inbound
-//	@Description  Creates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to either a named chain (chain_id), a single pool (pool_id, optionally narrowed by filters), or — when neither is set — any available outbound. Changes apply live: the engine starts/stops listeners on the next config version bump.
+//	@Description  Creates (or replaces) an inbound listener. When the body carries no id, the id must be supplied in the URL path (/api/inbounds/{id}); when both are present they must match. The policy routes the inbound (or, via per-user policy overrides, each user) to a named chain (chain_id), one pinned outbound server (outbound_id), or a single pool (pool_id, optionally narrowed by filters) — in that order of preference; when none is set, any available outbound. A user policy that sets any route field replaces the inbound's route as a group, and user filters are the user's own (replacing the inbound-level ones). Filters narrow every layer of a named chain too. Changes apply live: the engine starts/stops listeners on the next config version bump.
 //	@Tags         inbounds
 //	@Accept       json
 //	@Produce      json
@@ -526,7 +526,7 @@ func (s *Server) pools(w http.ResponseWriter, r *http.Request) {
 // createChain godoc
 //
 //	@Summary      Create or replace a chain
-//	@Description  Creates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector). Layer 0 is the first hop; each subsequent layer is dialed through the previous.
+//	@Description  Creates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector) or a single outbound server (pinned for that hop; when an id matches both, the pool wins). Layer 0 is the first hop; each subsequent layer is dialed through the previous.
 //	@Tags         chains
 //	@Accept       json
 //	@Produce      json
