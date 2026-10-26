@@ -741,7 +741,7 @@ func (e *errString) Error() string { return e.s }
 // listProviders godoc
 //
 //	@Summary      List providers
-//	@Description  Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool "default".
+//	@Description  Returns all configured dynamic outbound providers. Each provider feeds one or more managed pools (pool_ids) with the outbounds it fetches; providers created without a pool_ids list report the default pool "default".
 //	@Tags         providers
 //	@Produce      json
 //	@Success      200 {array} config.ProviderSpec
@@ -763,7 +763,7 @@ func (e *errString) Error() string { return e.s }
 // createProvider godoc
 //
 //	@Summary      Create or replace a provider
-//	@Description  Creates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. "psiphon", "subscription", "mihomo", "singbox"); pool_id is the managed pool its outbounds are merged into, defaulting to the "default" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.
+//	@Description  Creates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. "psiphon", "subscription", "mihomo", "singbox"); pool_ids lists the managed pools its outbounds are merged into — every pool in the list receives the provider's full outbound set — and defaults to ["default"] when omitted (the legacy singular pool_id is still accepted as a one-entry list); config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.
 //	@Tags         providers
 //	@Accept       json
 //	@Produce      json
@@ -777,7 +777,7 @@ func (e *errString) Error() string { return e.s }
 // deleteProvider godoc
 //
 //	@Summary      Delete a provider
-//	@Description  Removes the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.
+//	@Description  Removes the provider with the given id, stops its poll loop, and drops its managed outbounds and every pool it exclusively fed.
 //	@Tags         providers
 //	@Param        id path string true "Provider id"
 //	@Success      204 "No content"
@@ -812,11 +812,12 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, errResponse{"missing id"}, http.StatusBadRequest)
 			return
 		}
-		// An omitted pool_id means the default pool, so a provider can be
+		// An omitted pool list means the default pool, so a provider can be
 		// created with just a plugin + config (the common case: paste a
-		// subscription URL, land in "default").
-		if p.PoolID == "" {
-			p.PoolID = config.DefaultPoolID
+		// subscription URL, land in "default"). A provider may name several
+		// pools (pool_ids); the whole outbound set lands in each.
+		if len(p.PoolIDs) == 0 {
+			p.PoolIDs = []string{config.DefaultPoolID}
 		}
 		s.cfg.SetProvider(&p)
 		writeJSON(w, p, http.StatusCreated)

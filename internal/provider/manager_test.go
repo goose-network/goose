@@ -66,7 +66,7 @@ func TestManagerMergesProviderOutboundsIntoPool(t *testing.T) {
 	store.SetProvider(&config.ProviderSpec{
 		ID:       "p1",
 		Provider: "fake-merge-test",
-		PoolID:   "pool-from-provider",
+		PoolIDs:  []string{"pool-from-provider"},
 		Config:   map[string]any{},
 	})
 
@@ -172,7 +172,7 @@ func TestManagerKeepsPoolOnProviderError(t *testing.T) {
 	store.SetProvider(&config.ProviderSpec{
 		ID:       "perr",
 		Provider: "fake-err-test",
-		PoolID:   "pool-err",
+		PoolIDs:  []string{"pool-err"},
 		Config:   map[string]any{},
 	})
 
@@ -227,7 +227,7 @@ func TestManagerReconcilesOnConfigChange(t *testing.T) {
 	store.SetProvider(&config.ProviderSpec{
 		ID:       "late",
 		Provider: "fake-reconcile-test",
-		PoolID:   "pool-late",
+		PoolIDs:  []string{"pool-late"},
 		Config:   map[string]any{"url": "http://one"},
 	})
 	fp.set([]pub.OutboundConfig{
@@ -247,7 +247,7 @@ func TestManagerReconcilesOnConfigChange(t *testing.T) {
 	store.SetProvider(&config.ProviderSpec{
 		ID:       "late",
 		Provider: "fake-reconcile-test",
-		PoolID:   "pool-late",
+		PoolIDs:  []string{"pool-late"},
 		Config:   map[string]any{"url": "http://two"},
 	})
 

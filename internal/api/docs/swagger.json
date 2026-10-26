@@ -1383,7 +1383,7 @@
         },
         "/api/providers": {
             "get": {
-                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_id is the managed pool its outbounds are merged into, defaulting to the \"default\" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "description": "Returns all configured dynamic outbound providers. Each provider feeds one or more managed pools (pool_ids) with the outbounds it fetches; providers created without a pool_ids list report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_ids lists the managed pools its outbounds are merged into — every pool in the list receives the provider's full outbound set — and defaults to [\"default\"] when omitted (the legacy singular pool_id is still accepted as a one-entry list); config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and every pool it exclusively fed.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1467,7 +1467,7 @@
                 }
             },
             "post": {
-                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_id is the managed pool its outbounds are merged into, defaulting to the \"default\" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "description": "Returns all configured dynamic outbound providers. Each provider feeds one or more managed pools (pool_ids) with the outbounds it fetches; providers created without a pool_ids list report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_ids lists the managed pools its outbounds are merged into — every pool in the list receives the provider's full outbound set — and defaults to [\"default\"] when omitted (the legacy singular pool_id is still accepted as a one-entry list); config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and every pool it exclusively fed.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1553,7 +1553,7 @@
         },
         "/api/providers/{id}": {
             "get": {
-                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_id is the managed pool its outbounds are merged into, defaulting to the \"default\" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "description": "Returns all configured dynamic outbound providers. Each provider feeds one or more managed pools (pool_ids) with the outbounds it fetches; providers created without a pool_ids list report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_ids lists the managed pools its outbounds are merged into — every pool in the list receives the provider's full outbound set — and defaults to [\"default\"] when omitted (the legacy singular pool_id is still accepted as a one-entry list); config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and every pool it exclusively fed.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1637,7 +1637,7 @@
                 }
             },
             "delete": {
-                "description": "Returns all configured dynamic outbound providers. Each provider owns a managed pool that its outbounds are merged into; providers created without a pool_id report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_id is the managed pool its outbounds are merged into, defaulting to the \"default\" pool when omitted; config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and pool.",
+                "description": "Returns all configured dynamic outbound providers. Each provider feeds one or more managed pools (pool_ids) with the outbounds it fetches; providers created without a pool_ids list report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_ids lists the managed pools its outbounds are merged into — every pool in the list receives the provider's full outbound set — and defaults to [\"default\"] when omitted (the legacy singular pool_id is still accepted as a one-entry list); config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and every pool it exclusively fed.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1975,9 +1975,12 @@
                 "id": {
                     "type": "string"
                 },
-                "pool_id": {
-                    "description": "PoolID is the managed pool to populate; empty means the default pool.",
-                    "type": "string"
+                "pool_ids": {
+                    "description": "PoolIDs are the managed pools to populate; empty means the default pool.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "provider": {
                     "description": "plugin name, e.g. \"psiphon\"",

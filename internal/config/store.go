@@ -6,6 +6,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"sync"
 	"time"
@@ -208,26 +209,78 @@ type ChainSpec struct {
 const DefaultPoolID = "default"
 
 // ProviderSpec configures a dynamic outbound provider: a plugin that sources
-// its own proxy server configs and feeds them into a managed pool. The engine
+// its own proxy server configs and feeds them into managed pools. The engine
 // instantiates the provider from (Provider, Config), polls Outbounds, and
-// merges the result into the store as managed outbounds plus a pool named
-// PoolID. This is how a plugin like Psiphon (which fetches and refreshes a
-// remote server list) gets its servers into the engine's pool.
+// merges the result into the store as managed outbounds plus one pool per
+// listed PoolID. This is how a plugin like Psiphon (which fetches and
+// refreshes a remote server list) gets its servers into the engine's pools.
+//
+// A provider may feed several pools at once — the same outbound set lands in
+// each, so e.g. one subscription can back both a "fast" pool and a "fallback"
+// pool without duplicating the fetch. The legacy singular `pool_id` JSON
+// field is still accepted and is just a one-entry PoolIDs.
 type ProviderSpec struct {
 	ID       string `json:"id"`
 	Provider string `json:"provider"` // plugin name, e.g. "psiphon"
-	// PoolID is the managed pool to populate; empty means the default pool.
-	PoolID string         `json:"pool_id"`
-	Config map[string]any `json:"config"`
+	// PoolIDs are the managed pools to populate; empty means the default pool.
+	PoolIDs []string       `json:"pool_ids,omitempty"`
+	Config  map[string]any `json:"config"`
 }
 
-// EffectivePoolID returns the pool this spec's outbounds merge into, applying
-// the default-pool rule for specs created without one.
-func (p *ProviderSpec) EffectivePoolID() string {
-	if p.PoolID == "" {
-		return DefaultPoolID
+// UnmarshalJSON accepts both the plural `pool_ids` array and the legacy
+// singular `pool_id` string, so existing configs and API clients keep working.
+func (p *ProviderSpec) UnmarshalJSON(b []byte) error {
+	type plain ProviderSpec // avoid recursing into this method
+	var raw struct {
+		plain
+		PoolID  string   `json:"pool_id"`
+		PoolIDs []string `json:"pool_ids"`
 	}
-	return p.PoolID
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*p = ProviderSpec(raw.plain)
+	ids := raw.PoolIDs
+	if raw.PoolID != "" {
+		ids = append([]string{raw.PoolID}, ids...)
+	}
+	p.PoolIDs = ids
+	return nil
+}
+
+// MarshalJSON emits only the canonical `pool_ids` form; the singular
+// `pool_id` stays a read-compat input, not a second source of truth.
+func (p ProviderSpec) MarshalJSON() ([]byte, error) {
+	type plain ProviderSpec
+	out := struct {
+		plain
+		PoolIDs []string `json:"pool_ids"`
+	}{plain: plain(p), PoolIDs: p.PoolIDs}
+	// An explicit (possibly empty) pool_ids so the field always shows up in
+	// API responses, rather than omitempty dropping it.
+	return json.Marshal(out)
+}
+
+// EffectivePoolIDs returns the pools this spec's outbounds merge into,
+// applying the default-pool rule for specs created without any pool:
+// PoolIDs with empty entries dropped, duplicates removed, order preserved.
+func (p *ProviderSpec) EffectivePoolIDs() []string {
+	out := make([]string, 0, len(p.PoolIDs)+1)
+	seen := map[string]struct{}{}
+	for _, id := range p.PoolIDs {
+		if id == "" {
+			id = DefaultPoolID
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		out = append(out, DefaultPoolID)
+	}
+	return out
 }
 
 // Store is the concurrency-safe live configuration store.
@@ -454,41 +507,65 @@ func (s *Store) DeleteProvider(id string) bool {
 		return false
 	}
 	delete(s.providers, id)
-	// also drop any managed outbounds + pool this provider owned
+	// also drop any managed outbounds + pools this provider owned
 	s.clearManagedLocked(id)
-	// The managed pool is keyed by the spec's effective PoolID, not the
-	// provider id.
-	delete(s.pools, spec.EffectivePoolID())
+	// The managed pools are keyed by the spec's effective pool IDs, not the
+	// provider id. A pool may also be fed by OTHER providers (shared pool):
+	// only delete it when no remaining provider still targets it, and
+	// rebuild the survivors' view instead of leaving stale outbound refs.
+	for _, poolID := range spec.EffectivePoolIDs() {
+		if !s.providerFeedsPoolLocked(poolID) {
+			delete(s.pools, poolID)
+			continue
+		}
+		s.rebuildProviderPoolLocked(poolID)
+	}
 	s.bumpLocked()
 	return true
 }
 
+// providerFeedsPoolLocked reports whether any remaining provider targets
+// poolID. Caller holds s.mu.
+func (s *Store) providerFeedsPoolLocked(poolID string) bool {
+	for _, spec := range s.providers {
+		for _, id := range spec.EffectivePoolIDs() {
+			if id == poolID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SetProviderOutbounds replaces the full set of outbounds owned by providerID
-// with specs, and (re)builds the managed pool poolID to reference them. This
-// is the "get proxy server config from plugin into pool" seam: the engine
-// calls it with the result of Provider.Outbounds. It bumps the config version
-// exactly once so the router rebuilds with the new pool.
+// with specs, and (re)builds every managed pool the provider feeds to
+// reference them. This is the "get proxy server config from plugin into
+// pool" seam: the engine calls it with the result of Provider.Outbounds. It
+// bumps the config version exactly once so the router rebuilds with the new
+// pools.
 //
-// Outbounds whose IDs already exist (from any source) are overwritten; the
-// provider takes ownership of the given IDs. Previously-owned IDs not present
-// in specs are removed (but only if still owned by this provider, so a user
-// re-claiming an ID by hand is respected). The pool is created if missing.
-func (s *Store) SetProviderOutbounds(providerID, poolID string, specs []*OutboundSpec) {
+// The provider's pools are its spec's effective pool IDs (multi-pool): the
+// whole outbound set lands in EACH pool, merged with every other provider
+// targeting the same pool. Outbounds whose IDs already exist (from any
+// source) are overwritten; the provider takes ownership of the given IDs.
+// Previously-owned IDs not present in specs are removed (but only if still
+// owned by this provider, so a user re-claiming an ID by hand is respected).
+// Pools are created if missing. Pools the provider used to feed but no
+// longer does (its pool list was edited) are rebuilt without it — or deleted
+// when nothing else feeds them.
+func (s *Store) SetProviderOutbounds(providerID string, specs []*OutboundSpec) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// A deleted provider's late poll result is dropped: the manager cancels
 	// its poll loop on delete, but an in-flight Outbounds call can complete
-	// after the delete already cleared the provider's outbounds and pool.
+	// after the delete already cleared the provider's outbounds and pools.
 	// Merging then would resurrect them.
-	if _, ok := s.providers[providerID]; !ok {
+	provSpec, ok := s.providers[providerID]
+	if !ok {
 		return
 	}
-	// Same default-pool rule as the spec: a poll landing in the default pool
-	// must not create a literal "" pool entry.
-	if poolID == "" {
-		poolID = DefaultPoolID
-	}
+	poolIDs := provSpec.EffectivePoolIDs()
 
 	prev := s.managedOutbounds[providerID]
 	next := make(map[string]struct{}, len(specs))
@@ -507,39 +584,82 @@ func (s *Store) SetProviderOutbounds(providerID, poolID string, specs []*Outboun
 	}
 	s.managedOutbounds[providerID] = next
 
-	// (re)build the managed pool: this provider's outbounds plus every OTHER
-	// provider's outbounds that still target the same pool, so two providers
-	// sharing a pool (e.g. two subscriptions both landing in "default")
-	// accumulate instead of clobbering each other on each poll.
-	ids := make([]string, 0, len(specs))
-	for _, spec := range specs {
-		ids = append(ids, spec.ID)
+	// (re)build every pool the spec targets. rebuildProviderPoolLocked
+	// unions in every OTHER provider still aimed at the same pool, so two
+	// providers sharing a pool (e.g. two subscriptions both landing in
+	// "default") accumulate instead of clobbering each other on each poll.
+	fed := make(map[string]struct{}, len(poolIDs))
+	for _, poolID := range poolIDs {
+		fed[poolID] = struct{}{}
+		s.rebuildProviderPoolLocked(poolID)
 	}
-	for otherID, owned := range s.managedOutbounds {
-		if otherID == providerID {
+	// Pools that reference this provider's outbounds but are no longer in
+	// its pool list: rebuild without it, or delete when unfed.
+	for _, poolID := range s.fedPoolsLocked(providerID) {
+		if _, keep := fed[poolID]; keep {
 			continue
 		}
+		if !s.providerFeedsPoolLocked(poolID) {
+			delete(s.pools, poolID)
+			continue
+		}
+		s.rebuildProviderPoolLocked(poolID)
+	}
+
+	s.bumpLocked()
+}
+
+// fedPoolsLocked returns the pools that reference any of providerID's managed
+// outbounds — the pools it actually feeds even if the spec was just edited.
+// Caller holds s.mu.
+func (s *Store) fedPoolsLocked(providerID string) []string {
+	owned := s.managedOutbounds[providerID]
+	var pools []string
+	for poolID, pool := range s.pools {
+		for _, id := range pool.OutboundIDs {
+			if _, mine := owned[id]; mine {
+				pools = append(pools, poolID)
+				break
+			}
+		}
+	}
+	return pools
+}
+
+// rebuildProviderPoolLocked recomputes pool poolID as the union of every
+// provider's managed outbounds whose spec still targets it, preserving any
+// user-configured Filters/Selector/Access. Callers hold s.mu. The pool is
+// replaced by a fresh *Pool rather than mutated in place: the store hands
+// *Pool pointers to readers (Pool()/Pools()), which hold them beyond the
+// lock — mutating pool.OutboundIDs in place races with those readers.
+// Publishing a fresh Pool keeps every previously-returned pointer an
+// immutable snapshot.
+func (s *Store) rebuildProviderPoolLocked(poolID string) {
+	ids := []string{}
+	for providerID, owned := range s.managedOutbounds {
 		// Only providers still aimed at this pool contribute; a provider
 		// that moved to another pool leaves its old IDs behind.
-		otherSpec, ok := s.providers[otherID]
-		if !ok || otherSpec.EffectivePoolID() != poolID {
+		spec, ok := s.providers[providerID]
+		if !ok {
+			continue
+		}
+		targets := false
+		for _, id := range spec.EffectivePoolIDs() {
+			if id == poolID {
+				targets = true
+				break
+			}
+		}
+		if !targets {
 			continue
 		}
 		for id := range owned {
-			if _, keep := next[id]; keep {
-				continue
-			}
 			if _, ok := s.outbounds[id]; !ok {
 				continue
 			}
 			ids = append(ids, id)
 		}
 	}
-	// Replace the pool pointer rather than mutating it in place: the store
-	// hands *Pool pointers to readers (Pool()/Pools()), which hold them
-	// beyond the lock — mutating pool.OutboundIDs in place races with those
-	// readers. Publishing a fresh Pool keeps every previously-returned
-	// pointer an immutable snapshot.
 	pool := &Pool{
 		ID:          poolID,
 		OutboundIDs: ids,
@@ -553,8 +673,6 @@ func (s *Store) SetProviderOutbounds(providerID, poolID string, specs []*Outboun
 		pool.Access = existing.Access
 	}
 	s.pools[poolID] = pool
-
-	s.bumpLocked()
 }
 
 // clearManagedLocked drops all outbounds owned by providerID. Caller holds s.mu.

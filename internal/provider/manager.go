@@ -13,7 +13,8 @@
 //
 // Each poll result is merged into the config store via
 // Store.SetProviderOutbounds, which replaces the provider's managed outbounds
-// and rebuilds its pool, bumping the config version so the router rebuilds.
+// and rebuilds every pool it feeds (a provider can target several pools via
+// pool_ids), bumping the config version so the router rebuilds.
 package provider
 
 import (
@@ -131,8 +132,16 @@ type specCancel struct {
 // differ. The spec pointer itself is replaced by the store on every
 // SetProvider, so compare by value.
 func providerChanged(a, b *config.ProviderSpec) bool {
-	if a.ID != b.ID || a.Provider != b.Provider || a.PoolID != b.PoolID {
+	if a.ID != b.ID || a.Provider != b.Provider {
 		return true
+	}
+	if len(a.PoolIDs) != len(b.PoolIDs) {
+		return true
+	}
+	for i := range a.PoolIDs {
+		if a.PoolIDs[i] != b.PoolIDs[i] {
+			return true
+		}
 	}
 	if len(a.Config) != len(b.Config) {
 		return true
@@ -204,13 +213,15 @@ func (m *Manager) run(ctx context.Context, spec *config.ProviderSpec, prov pub.P
 	}
 }
 
-// poll calls the provider's Outbounds and merges the result into the store.
+// poll calls the provider's Outbounds and merges the result into every pool
+// the spec targets (multi-pool fan-out: SetProviderOutbounds reads the
+// spec's effective pool IDs itself).
 func (m *Manager) poll(ctx context.Context, spec *config.ProviderSpec, prov pub.Provider) {
 	cfgs, err := prov.Outbounds(ctx)
 	if err != nil {
-		// Keep the previous pool; a transient fetch failure shouldn't drain
-		// the pool. The provider's next refresh will retry.
-		fmt.Printf("provider: %s Outbounds: %v (keeping existing pool)\n", spec.ID, err)
+		// Keep the previous pools; a transient fetch failure shouldn't drain
+		// them. The provider's next refresh will retry.
+		fmt.Printf("provider: %s Outbounds: %v (keeping existing pools)\n", spec.ID, err)
 		return
 	}
 	specs := make([]*config.OutboundSpec, 0, len(cfgs))
@@ -221,7 +232,7 @@ func (m *Manager) poll(ctx context.Context, spec *config.ProviderSpec, prov pub.
 			Config:   c.Config,
 		})
 	}
-	m.cfg.SetProviderOutbounds(spec.ID, spec.EffectivePoolID(), specs)
+	m.cfg.SetProviderOutbounds(spec.ID, specs)
 }
 
 // Close stops all provider goroutines. It is idempotent.

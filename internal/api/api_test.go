@@ -225,14 +225,14 @@ func TestProviderCRUD(t *testing.T) {
 	if err := json.Unmarshal(body, &created); err != nil {
 		t.Fatalf("unmarshal created: %v body=%s", err, body)
 	}
-	if created.PoolID != config.DefaultPoolID {
-		t.Fatalf("omitted pool_id should round-trip as %q, got %q", config.DefaultPoolID, created.PoolID)
+	if len(created.PoolIDs) != 1 || created.PoolIDs[0] != config.DefaultPoolID {
+		t.Fatalf("omitted pool_ids should round-trip as [%q], got %v", config.DefaultPoolID, created.PoolIDs)
 	}
 
 	// Create via the item path with no body id.
 	spec := config.ProviderSpec{
 		Provider: "subscription",
-		PoolID:   "pool-sub",
+		PoolIDs:  []string{"pool-sub"},
 		Config:   map[string]any{"url": "https://example.com/sub"},
 	}
 	code, body = do(t, hs, "POST", "/api/providers/p1", "", spec)
@@ -271,7 +271,7 @@ func TestProviderCRUD(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("unmarshal: %v body=%s", err, body)
 	}
-	if got.ID != "p1" || got.Provider != "subscription" || got.PoolID != "pool-sub" {
+	if got.ID != "p1" || got.Provider != "subscription" || len(got.PoolIDs) != 1 || got.PoolIDs[0] != "pool-sub" {
 		t.Fatalf("round-trip mismatch: %+v", got)
 	}
 	if u, _ := got.Config["url"].(string); u != "https://example.com/sub" {
@@ -298,7 +298,7 @@ func TestProviderCRUD(t *testing.T) {
 // id of "bar" is rejected with 400.
 func TestProviderIDMismatchRejected(t *testing.T) {
 	hs, _, _ := newAPIServer(t, "")
-	spec := config.ProviderSpec{ID: "bar", Provider: "subscription", PoolID: "p"}
+	spec := config.ProviderSpec{ID: "bar", Provider: "subscription", PoolIDs: []string{"p"}}
 	code, _ := do(t, hs, "POST", "/api/providers/foo", "", spec)
 	if code != http.StatusBadRequest {
 		t.Fatalf("id mismatch should yield 400, got %d", code)

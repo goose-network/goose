@@ -59,7 +59,9 @@ authenticated git BuildKit secret.
 
 Config is a JSON document with `engine`, `inbounds`, `outbounds`, `pools`,
 `chains`, and `providers` (all optional). Example — a SOCKS5 inbound whose
-pool is populated dynamically by the Psiphon provider:
+pool is populated dynamically by the Psiphon provider, here with no config at
+all (the plugin's embedded production defaults auto-retrieve the signed
+server list):
 
 ```json
 {
@@ -72,22 +74,39 @@ pool is populated dynamically by the Psiphon provider:
     { "id": "in-socks", "protocol": "socks5", "listen": "127.0.0.1:11080" }
   ],
   "providers": [
-    {
-      "id": "psiphon-prov",
-      "provider": "psiphon",
-      "pool_id": "psiphon-pool",
-      "config": {
-        "config_path": "/path/to/psiphon.config",
-        "server_list_path": "/path/to/server_list.dat",
-        "data_dir": "/path/to/data-root",
-        "upstream_proxy": "socks5://127.0.0.1:7890",
-        "establish_timeout_seconds": 180,
-        "outbound_id": "psiphon"
-      }
-    }
+    { "id": "psiphon-prov", "provider": "psiphon", "pool_ids": ["psiphon-pool"] }
   ]
 }
 ```
+
+A provider may feed **several pools at once** — list them in `pool_ids` and
+the provider's whole outbound set lands in each, so one subscription can back
+both a "fast" and a "fallback" pool without duplicating the fetch (the legacy
+singular `pool_id` still works as a one-entry list):
+
+```json
+"providers": [
+  {
+    "id": "psiphon-prov",
+    "provider": "psiphon",
+    "pool_ids": ["fast", "fallback"],
+    "config": {
+      "config_path": "/path/to/psiphon.config",
+      "server_list_path": "/path/to/server_list.dat",
+      "data_dir": "/path/to/data-root",
+      "upstream_proxy": "socks5://127.0.0.1:7890",
+      "establish_timeout_seconds": 180,
+      "outbound_id": "psiphon"
+    }
+  }
+]
+```
+
+Every field of the psiphon `config` is optional; with no `config_path` the
+provider embeds the production Psiphon network parameters (channel, sponsor,
+remote-server-list URLs and signing keys, extracted from the official
+client) and fetches the server list itself — see
+[the plugin README](../psiphon/README.md).
 
 Then route through it:
 
@@ -278,7 +297,8 @@ acyclic.
   `plugin.Register("myproto", factory)` in `init()`.
 - **Provider plugin** — implement `Provider` (a dynamic source of outbound
   configs), call `plugin.RegisterProvider("myprov", factory)` in `init()`.
-  The engine polls `Outbounds` and merges the result into a managed pool.
+  The engine polls `Outbounds` and merges the result into each managed pool
+  named by the spec's `pool_ids` (one provider can feed several pools).
 
 Built-in protocols (`direct`, `http`, `socks5`) live under `plugins/`. The
 bundled [Psiphon provider](../psiphon), the

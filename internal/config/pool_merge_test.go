@@ -11,8 +11,8 @@ import (
 // provider's outbounds in the pool alongside its own.
 func TestSetProviderOutboundsSharedPool(t *testing.T) {
 	s := NewStore()
-	s.SetProvider(&ProviderSpec{ID: "p1", Provider: "x", PoolID: "default"})
-	s.SetProvider(&ProviderSpec{ID: "p2", Provider: "x", PoolID: "default"})
+	s.SetProvider(&ProviderSpec{ID: "p1", Provider: "x", PoolIDs: []string{"default"}})
+	s.SetProvider(&ProviderSpec{ID: "p2", Provider: "x", PoolIDs: []string{"default"}})
 
 	specs := func(ids ...string) []*OutboundSpec {
 		out := make([]*OutboundSpec, len(ids))
@@ -22,14 +22,14 @@ func TestSetProviderOutboundsSharedPool(t *testing.T) {
 		return out
 	}
 
-	s.SetProviderOutbounds("p1", "default", specs("p1-a", "p1-b"))
+	s.SetProviderOutbounds("p1", specs("p1-a", "p1-b"))
 	pool, ok := s.Pool("default")
 	if !ok || len(pool.OutboundIDs) != 2 {
 		t.Fatalf("p1 poll pool = %+v ok=%v", pool, ok)
 	}
 
 	// p2's poll must not evict p1's outbounds from the shared pool.
-	s.SetProviderOutbounds("p2", "default", specs("p2-a"))
+	s.SetProviderOutbounds("p2", specs("p2-a"))
 	pool, ok = s.Pool("default")
 	if !ok {
 		t.Fatal("pool missing")
@@ -42,7 +42,7 @@ func TestSetProviderOutboundsSharedPool(t *testing.T) {
 	}
 
 	// p1 refreshes with a changed set: p1-b gone, p1-c in; p2-a stays.
-	s.SetProviderOutbounds("p1", "default", specs("p1-a", "p1-c"))
+	s.SetProviderOutbounds("p1", specs("p1-a", "p1-c"))
 	pool, _ = s.Pool("default")
 	got = append([]string(nil), pool.OutboundIDs...)
 	sort.Strings(got)
@@ -52,8 +52,8 @@ func TestSetProviderOutboundsSharedPool(t *testing.T) {
 	}
 
 	// p2 moves to its own pool: the default pool must drop its outbounds.
-	s.SetProvider(&ProviderSpec{ID: "p2", Provider: "x", PoolID: "other"})
-	s.SetProviderOutbounds("p1", "default", specs("p1-a", "p1-c"))
+	s.SetProvider(&ProviderSpec{ID: "p2", Provider: "x", PoolIDs: []string{"other"}})
+	s.SetProviderOutbounds("p1", specs("p1-a", "p1-c"))
 	pool, _ = s.Pool("default")
 	got = append([]string(nil), pool.OutboundIDs...)
 	sort.Strings(got)
@@ -62,7 +62,7 @@ func TestSetProviderOutboundsSharedPool(t *testing.T) {
 		t.Fatalf("pool after p2 moved away = %v, want %v", got, want)
 	}
 	// p2's own pool fills when its poll lands there.
-	s.SetProviderOutbounds("p2", "other", specs("p2-a"))
+	s.SetProviderOutbounds("p2", specs("p2-a"))
 	pool, _ = s.Pool("other")
 	if len(pool.OutboundIDs) != 1 || pool.OutboundIDs[0] != "p2-a" {
 		t.Fatalf("other pool = %v", pool.OutboundIDs)
