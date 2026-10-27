@@ -30,7 +30,7 @@ pins=(
   github.com/Psiphon-Labs/quic-go=github.com/goose-network/psiphon-quic-go@v0.0.0-20261026053528-9822823f4fad
   github.com/metacubex/mihomo=github.com/metacubex/mihomo@v0.0.0-20260922124647-afe94dafef8c
   github.com/sagernet/sing-box=github.com/sagernet/sing-box@v0.0.0-20260922113237-e5e705ed802d
-  github.com/geph-official/geph5-go=github.com/goose-network/geph5-go@v0.0.0-20261026234138-0ae835e0ae87
+  github.com/geph-official/geph5-go=github.com/goose-network/geph5-go@v0.0.0-20261027021035-53b4a946b97d
   github.com/goose-network/openrung-go=github.com/goose-network/openrung-go@v0.0.0-20261026124742-1328643f58ce
   github.com/openrung/openrung/brokerapi=github.com/openrung/openrung/brokerapi@v0.7.1-0.20260923074427-404d84a15812
 )
