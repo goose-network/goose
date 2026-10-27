@@ -23,22 +23,42 @@ import (
 // outbounds. It is idempotent (guarded by sync.Once) because pub.Register
 // panics on duplicate registration and a test binary may construct many
 // routers. "testdirect" returns a plain FakeOutbound (no ChainDialer);
-// "testchain" returns a ChainFakeOutbound (implements ChainDialer).
+// "testchain" returns a ChainFakeOutbound (implements ChainDialer);
+// "testupstream" returns an outbound whose dials ride the engine-injected
+// upstream-route dialer, modeling what http/socks5-style outbounds do with
+// their own server connection.
 var testPluginsOnce sync.Once
 
 func registerTestPlugins() {
 	testPluginsOnce.Do(func() {
 		if _, ok := pub.Lookup("testdirect"); !ok {
 			pub.Register("testdirect", func(cfg map[string]any) (core.Outbound, error) {
-				return &fake.FakeOutbound{IDVal: cfg["id"].(string), Proto: "testdirect"}, nil
+				return &fake.FakeOutbound{IDVal: cfg["id"].(string), Proto: "testdirect", AddrVal: cfgStr(cfg, "address")}, nil
 			})
 		}
 		if _, ok := pub.Lookup("testchain"); !ok {
 			pub.Register("testchain", func(cfg map[string]any) (core.Outbound, error) {
-				return &fake.ChainFakeOutbound{FakeOutbound: fake.FakeOutbound{IDVal: cfg["id"].(string), Proto: "testchain"}}, nil
+				return &fake.ChainFakeOutbound{FakeOutbound: fake.FakeOutbound{IDVal: cfg["id"].(string), Proto: "testchain", AddrVal: cfgStr(cfg, "address")}}, nil
+			})
+		}
+		if _, ok := pub.Lookup("testupstream"); !ok {
+			pub.Register("testupstream", func(cfg map[string]any) (core.Outbound, error) {
+				return &upstreamFakeOutbound{
+					FakeOutbound: fake.FakeOutbound{IDVal: cfg["id"].(string), Proto: "testupstream"},
+					upstream:     pub.AsUpstreamDialer(cfg),
+				}, nil
 			})
 		}
 	})
+}
+
+// cfgStr reads a string value from a plugin config map, "" when absent or
+// not a string.
+func cfgStr(cfg map[string]any, key string) string {
+	if v, ok := cfg[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 // testRouter builds a router backed by a config store pre-populated with the

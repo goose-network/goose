@@ -141,15 +141,24 @@ func (r *Router) rebuild() {
 	for _, spec := range r.cfg.Outbounds() {
 		// Inject the engine stack dialer so outbound plugins reach their own
 		// servers (and, for "direct", the target) through the configured
-		// system/gvisor stack instead of a bare net.Dialer. We copy the
-		// config map so we never mutate the caller's config.
+		// system/gvisor stack instead of a bare net.Dialer. Inject the
+		// upstream-route dialer the same way when the outbound's own server
+		// connection is configured to ride another engine route
+		// (spec.UpstreamProxy) — it re-resolves the route against live config
+		// per dial, so this injection survives pool edits and rebuilds.
+		// We copy the config map so we never mutate the caller's config.
 		cfg := spec.Config
-		if r.stack != nil {
-			cfg = make(map[string]any, len(spec.Config)+1)
+		if r.stack != nil || spec.UpstreamProxy != "" {
+			cfg = make(map[string]any, len(spec.Config)+2)
 			for k, v := range spec.Config {
 				cfg[k] = v
 			}
-			cfg["_dialer"] = r.stack
+			if r.stack != nil {
+				cfg[pub.StackDialerKey] = r.stack
+			}
+			if spec.UpstreamProxy != "" {
+				cfg[pub.UpstreamDialerKey] = r.OutboundUpstreamDialer(spec.UpstreamProxy)
+			}
 		}
 		o, err := plugin.Build(spec.Protocol, cfg)
 		if err != nil {

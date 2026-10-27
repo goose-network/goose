@@ -1,14 +1,22 @@
-// upstream_proxy resolution: the router implements the engine side of
-// config.ProviderSpec.UpstreamProxy, routing a provider's own URL fetches
-// (the subscription download, the server-list fetch, ...) through an
-// engine-managed proxy instead of the engine host's local network.
+// upstream_proxy resolution: the router implements the engine side of the
+// upstream-route references, routing a plugin's own network activity through
+// engine-managed proxies instead of the engine host's local network. Two
+// config surfaces name a route:
+//
+//   - config.ProviderSpec.UpstreamProxy — a provider's own URL fetches (the
+//     subscription download, the server-list fetch, ...). The manager
+//     injects the resolved dialer into the provider's config map.
+//   - config.OutboundSpec.UpstreamProxy — an outbound's own connection to
+//     its proxy server. The router injects the resolved dialer into the
+//     outbound's config map at build time.
 //
 // The reference is resolved against live config at DIAL time — a running
-// provider's next fetch sees pool edits, access-pool changes, and rebuilt
-// outbounds without a restart. The routes it can name mirror the engine's
-// other reference forms (chain layers, inbound policies):
+// provider's next fetch, and a built outbound's next server dial, see pool
+// edits, access-pool changes, and rebuilt outbounds without a restart. The
+// routes it can name mirror the engine's other reference forms (chain
+// layers, inbound policies):
 //
-//   - "" / "direct": dial the fetch target directly through the engine
+//   - "" / "direct": dial the target directly through the engine
 //     stack (the pre-feature behavior)
 //   - "outbound:<id>": one specific proxy server; a bare id resolves as a
 //     pool when a pool with that id exists, else as an outbound — the same
@@ -17,10 +25,17 @@
 //     failover across members; the pool's access filter applies, so members
 //     the local network cannot reach directly are dialed through the access
 //     pool's proxies (auto-chain semantics)
-//   - "access": test-dial the target directly first, then fall back to the
-//     access pool of the pools this provider feeds — the same
-//     direct-then-relay reachability testing the access filter performs
-//     for pool members
+//   - "chain:<id>": traverse a named chain layer by layer — real multi-hop
+//     semantics: hop i tunnels toward hop i+1's proxy-server address, and
+//     only the last hop connects toward the target
+//   - "access": (providers only) test-dial the target directly first, then
+//     fall back to the access pool of the pools this provider feeds — the
+//     same direct-then-relay reachability testing the access filter
+//     performs for pool members
+//
+// Nested routes (an upstream whose own server dial rides another route, a
+// chain whose hop outbounds carry upstreams) are bounded by maxUpstreamDepth
+// so a cyclic reference fails with a diagnostic instead of recursing.
 package router
 
 import (
@@ -45,31 +60,61 @@ const (
 	// upstreamTotalBudget bounds one whole fetch dial when the caller's
 	// context has no deadline, so a pool failover loop cannot run unbounded.
 	upstreamTotalBudget = 60 * time.Second
+	// maxUpstreamDepth bounds how many upstream routes may nest inside one
+	// dial: an outbound's server dial can ride a route whose members carry
+	// their own routes, and a chain hop likewise. A cyclic reference
+	// (outbound X routed through a pool containing X) would otherwise
+	// recurse until the stack dies; the depth counter turns it into a
+	// diagnostic instead.
+	maxUpstreamDepth = 8
 )
 
-// UpstreamDialer implements provider's upstream source: it returns the
-// dialer routing spec's own fetches through spec.UpstreamProxy, or nil when
-// the spec configures none (the provider then fetches directly — the
-// pre-feature behavior).
+// upstreamDepthKey is the context key carrying the current route-nesting
+// depth. Each DialUpstream entry increments it; the value flows through the
+// engine's dial path (CheckDial, dialChain, hop DialContexts) into any
+// nested DialUpstream call.
+type upstreamDepthKey struct{}
+
+// UpstreamDialer implements the provider side of spec's upstream source: it
+// returns the dialer routing spec's own fetches through
+// spec.UpstreamProxy, or nil when the spec configures none (the provider
+// then fetches directly — the pre-feature behavior).
 func (r *Router) UpstreamDialer(spec *config.ProviderSpec) pub.UpstreamDialer {
 	if spec == nil || spec.UpstreamProxy == "" {
 		return nil
 	}
-	return &fetchDialer{r: r, spec: spec}
+	return &routeDialer{r: r, route: spec.UpstreamProxy, spec: spec}
 }
 
-// fetchDialer dials a provider's fetch targets through the route named by
-// spec.UpstreamProxy, re-resolved against the router's live state per dial.
-type fetchDialer struct {
-	r    *Router
-	spec *config.ProviderSpec
+// OutboundUpstreamDialer returns the dialer routing one outbound's own
+// server connection through route (the outbound-level
+// config.OutboundSpec.UpstreamProxy), or nil for an empty route. The dialer
+// re-resolves the route against live config per dial, exactly like the
+// provider-side UpstreamDialer; the router injects it into the outbound's
+// config map under pub.UpstreamDialerKey at build time. The "access" form
+// is provider-only (an outbound feeds no pools) and errors at dial time.
+func (r *Router) OutboundUpstreamDialer(route string) pub.UpstreamDialer {
+	if route == "" {
+		return nil
+	}
+	return &routeDialer{r: r, route: route}
 }
 
-// DialUpstream dials address (host:port) through the provider's configured
-// upstream route. The returned connection is a tunnel to address: the
-// upstream proxy's handshake has already been performed, and the target
-// protocol (TLS, HTTP, ...) runs over it directly.
-func (d *fetchDialer) DialUpstream(ctx context.Context, network, address string) (net.Conn, error) {
+// routeDialer dials a plugin's own targets through the route it was built
+// from, re-resolved against the router's live state per dial. spec is
+// non-nil for provider routes (it feeds the "access" fallback); nil for
+// outbound-level routes.
+type routeDialer struct {
+	r     *Router
+	route string
+	spec  *config.ProviderSpec
+}
+
+// DialUpstream dials address (host:port) through the configured upstream
+// route. The returned connection is a tunnel to address: the upstream
+// proxy's handshake has already been performed, and the target protocol
+// (TLS, HTTP, ...) runs over it directly.
+func (d *routeDialer) DialUpstream(ctx context.Context, network, address string) (net.Conn, error) {
 	// Bound the whole resolution when the caller did not: failover across a
 	// pool's members must not run unbounded on a deadline-less context.
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
@@ -77,6 +122,17 @@ func (d *fetchDialer) DialUpstream(ctx context.Context, network, address string)
 		ctx, cancel = context.WithTimeout(ctx, upstreamTotalBudget)
 		defer cancel()
 	}
+	// Cycle guard: count this resolution, so a route that (transitively)
+	// routes back through itself errors out instead of recursing.
+	depth := 0
+	if n, ok := ctx.Value(upstreamDepthKey{}).(int); ok {
+		depth = n
+	}
+	if depth >= maxUpstreamDepth {
+		return nil, fmt.Errorf("router: upstream_proxy %q: route nesting deeper than %d levels (cyclic reference?)", d.route, maxUpstreamDepth)
+	}
+	ctx = context.WithValue(ctx, upstreamDepthKey{}, depth+1)
+
 	meta := core.Metadata{
 		Network:   core.Network(network),
 		StartedAt: time.Now(),
@@ -84,7 +140,7 @@ func (d *fetchDialer) DialUpstream(ctx context.Context, network, address string)
 	if host, port, err := net.SplitHostPort(address); err == nil {
 		meta.TargetHost, meta.TargetPort = host, port
 	}
-	return d.r.dialUpstream(ctx, d.spec.UpstreamProxy, meta, d.spec)
+	return d.r.dialUpstream(ctx, d.route, meta, d.spec)
 }
 
 // dialUpstream resolves route and dials meta's target through it. Every
@@ -96,6 +152,9 @@ func (r *Router) dialUpstream(ctx context.Context, route string, meta core.Metad
 	case route == "" || route == "direct":
 		return r.stack.Dial(ctx, string(meta.Network), meta.Target())
 	case route == "access":
+		if spec == nil {
+			return nil, fmt.Errorf("router: upstream_proxy access: valid only on a provider (feeds pools); an outbound has no pools to resolve an access route from")
+		}
 		return r.dialUpstreamAccess(ctx, meta, spec)
 	}
 	kind, id := splitRoute(route)
@@ -104,6 +163,8 @@ func (r *Router) dialUpstream(ctx context.Context, route string, meta core.Metad
 		return r.dialUpstreamOutbound(ctx, id, meta)
 	case "pool":
 		return r.dialUpstreamPool(ctx, id, meta)
+	case "chain":
+		return r.dialUpstreamChain(ctx, id, meta)
 	case "":
 		// Bare id: a pool with that id wins, else an outbound — the same
 		// precedence chain layers use.
@@ -112,8 +173,29 @@ func (r *Router) dialUpstream(ctx context.Context, route string, meta core.Metad
 		}
 		return r.dialUpstreamOutbound(ctx, id, meta)
 	default:
-		return nil, fmt.Errorf("router: upstream_proxy %q: unknown prefix %q (want outbound:, pool:, access, or direct)", route, kind)
+		return nil, fmt.Errorf("router: upstream_proxy %q: unknown prefix %q (want outbound:, pool:, chain:, access, or direct)", route, kind)
 	}
+}
+
+// dialUpstreamChain traverses a named chain: the router's own dialChain
+// semantics, so each layer's filters, selector, and access narrowing apply,
+// hop i tunnels toward hop i+1's proxy-server address, and the final hop
+// connects toward the fetch target.
+func (r *Router) dialUpstreamChain(ctx context.Context, id string, meta core.Metadata) (net.Conn, error) {
+	r.mu.RLock()
+	ch, ok := r.chains[id]
+	r.mu.RUnlock()
+	if !ok || len(ch) == 0 {
+		return nil, fmt.Errorf("router: upstream_proxy chain %q: not configured", id)
+	}
+	// r.chains is replaced wholesale on rebuild and never mutated in place,
+	// so the snapshot chain stays valid after the lock is released; dialChain
+	// copies each layer's candidate pool under its own lock before dialing.
+	conn, _, err := r.dialChain(ctx, ch, meta)
+	if err != nil {
+		return nil, fmt.Errorf("router: upstream_proxy chain %s: %w", id, err)
+	}
+	return conn, nil
 }
 
 // dialUpstreamOutbound pins one specific proxy server. The dial follows the

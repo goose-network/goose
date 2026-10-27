@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,6 +26,13 @@ func TestStoreCRUD(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "http", ob.Protocol)
 
+	// outbound-level upstream routes survive the store round-trip
+	s.SetOutbound(&OutboundSpec{ID: "ob2", Protocol: "http", UpstreamProxy: "pool:p1",
+		Config: map[string]any{"address": "1.2.3.4:8080"}})
+	ob2, ok := s.Outbound("ob2")
+	require.True(t, ok)
+	assert.Equal(t, "pool:p1", ob2.UpstreamProxy)
+
 	// pools
 	s.SetPool(&Pool{ID: "p1", OutboundIDs: []string{"ob1"}, Selector: SelectorSpec{Type: "roundrobin"}})
 	p, ok := s.Pool("p1")
@@ -36,6 +44,26 @@ func TestStoreCRUD(t *testing.T) {
 	c, ok := s.Chain("c1")
 	require.True(t, ok)
 	assert.Equal(t, []string{"p1"}, c.Layers)
+}
+
+// TestOutboundUpstreamProxyJSONRoundTrip: the outbound-level upstream route
+// survives the durable-config wire format under its documented
+// "upstream_proxy" key, both directions.
+func TestOutboundUpstreamProxyJSONRoundTrip(t *testing.T) {
+	doc := Doc{
+		Outbounds: []*OutboundSpec{
+			{ID: "ob", Protocol: "http", UpstreamProxy: "chain:c1",
+				Config: map[string]any{"address": "1.2.3.4:8080"}},
+		},
+	}
+	b, err := marshalDoc(doc)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"upstream_proxy": "chain:c1"`, "wire key should be upstream_proxy")
+
+	var back Doc
+	require.NoError(t, json.Unmarshal(b, &back))
+	require.Len(t, back.Outbounds, 1)
+	assert.Equal(t, "chain:c1", back.Outbounds[0].UpstreamProxy)
 }
 
 func TestStoreVersionBumps(t *testing.T) {

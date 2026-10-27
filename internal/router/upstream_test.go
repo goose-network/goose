@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 
 	"github.com/goose-network/goose/internal/config"
 	"github.com/goose-network/goose/internal/core"
 	"github.com/goose-network/goose/internal/core/fake"
+	pub "github.com/goose-network/goose/pkg/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -275,4 +277,196 @@ func TestUpstreamDialerHotReload(t *testing.T) {
 	conn.Close()
 	require.Equal(t, 1, fakeOutbound(t, r, "new").DialCount, "edited pool membership should apply to the next dial")
 	require.Zero(t, fakeOutbound(t, r, "old").DialCount)
+}
+
+// upstreamFakeOutbound is the test plugin behind the "testupstream" protocol:
+// it models an outbound plugin that consumes the engine-injected upstream
+// dialer — every dial it serves rides the route configured on the outbound
+// spec, exactly like http/socks5 route their own server connection.
+type upstreamFakeOutbound struct {
+	fake.FakeOutbound
+	upstream pub.UpstreamDialer
+}
+
+func (u *upstreamFakeOutbound) DialContext(ctx context.Context, network core.Network, target string) (net.Conn, error) {
+	if u.upstream == nil {
+		return u.FakeOutbound.DialContext(ctx, network, target)
+	}
+	return u.upstream.DialUpstream(ctx, string(network), target)
+}
+
+// TestUpstreamDialerChainRouteMultiHop: "chain:<id>" traverses a named chain
+// with real multi-hop semantics — hop 1 dials hop 2's proxy-server address
+// (not the fetch target), and hop 2 is dialed THROUGH hop 1's tunnel with
+// the fetch target as its dial target.
+func TestUpstreamDialerChainRouteMultiHop(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "hop1", Protocol: "testdirect", Config: map[string]any{"id": "hop1"}},
+			{ID: "hop2", Protocol: "testchain", Config: map[string]any{"id": "hop2", "address": "hop2.example:1080"}},
+		},
+		[]*config.Pool{
+			{ID: "c1", OutboundIDs: []string{"hop1"}, Selector: config.SelectorSpec{Type: "random"}},
+			{ID: "c2", OutboundIDs: []string{"hop2"}, Selector: config.SelectorSpec{Type: "random"}},
+		},
+		[]*config.ChainSpec{{ID: "cc", Layers: []string{"c1", "c2"}}},
+		nil)
+
+	var hop1Mu sync.Mutex
+	hop1Target := ""
+	unwrap(t, r, "hop1").(*fake.FakeOutbound).OnDial = func(_ core.Network, target string) (net.Conn, error) {
+		hop1Mu.Lock()
+		hop1Target = target
+		hop1Mu.Unlock()
+		a, b := net.Pipe()
+		go a.Close()
+		return b, nil
+	}
+	hop2 := unwrap(t, r, "hop2").(*fake.ChainFakeOutbound)
+
+	conn := dialViaRoute(t, r, "chain:cc", "example.com:443")
+	defer conn.Close()
+	hop1Mu.Lock()
+	require.Equal(t, "hop2.example:1080", hop1Target, "hop 1 should dial hop 2's proxy-server address")
+	hop1Mu.Unlock()
+	require.Equal(t, 1, hop2.DialThroughCount, "hop 2 should be dialed exactly once")
+	require.NotNil(t, hop2.LastVia, "hop 2 must be dialed THROUGH hop 1's tunnel")
+}
+
+// TestUpstreamDialerChainRouteSingleHop: a one-layer chain routes the fetch
+// through that layer's pool.
+func TestUpstreamDialerChainRouteSingleHop(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{{ID: "solo", Protocol: "testdirect", Config: map[string]any{"id": "solo"}}},
+		[]*config.Pool{{ID: "sp", OutboundIDs: []string{"solo"}}},
+		[]*config.ChainSpec{{ID: "sc", Layers: []string{"sp"}}},
+		nil)
+
+	sawTarget := make(chan string, 1)
+	fo := fakeOutbound(t, r, "solo")
+	fo.OnDial = func(_ core.Network, target string) (net.Conn, error) {
+		sawTarget <- target
+		a, b := net.Pipe()
+		go a.Close()
+		return b, nil
+	}
+
+	conn := dialViaRoute(t, r, "chain:sc", "example.com:443")
+	defer conn.Close()
+	require.Equal(t, "example.com:443", <-sawTarget, "single-hop chain should dial the fetch target")
+}
+
+// TestUpstreamDialerChainUnknown: a chain id that is not configured errors
+// clearly instead of dialing directly.
+func TestUpstreamDialerChainUnknown(t *testing.T) {
+	r, _ := testRouter(t, nil, nil, nil, nil)
+	d := r.UpstreamDialer(upstreamSpec("chain:nope"))
+	require.NotNil(t, d)
+	_, err := d.DialUpstream(context.Background(), "tcp", "example.com:443")
+	require.ErrorContains(t, err, `chain "nope"`)
+	require.ErrorContains(t, err, "not configured")
+}
+
+// TestOutboundUpstreamDialerInjection: an outbound spec with upstream_proxy
+// gets the engine route dialer injected into its config map at build time,
+// and the built outbound's dials ride the named route — here reaching the
+// pinned outbound "px" for the target it was asked to dial.
+func TestOutboundUpstreamDialerInjection(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "rider", Protocol: "testupstream", UpstreamProxy: "outbound:px",
+				Config: map[string]any{"id": "rider"}},
+			{ID: "px", Protocol: "testdirect", Config: map[string]any{"id": "px"}},
+		},
+		nil, nil, nil)
+
+	sawTarget := make(chan string, 1)
+	fo := fakeOutbound(t, r, "px")
+	fo.OnDial = func(_ core.Network, target string) (net.Conn, error) {
+		sawTarget <- target
+		a, b := net.Pipe()
+		go a.Close()
+		return b, nil
+	}
+
+	// Dialing through "rider" must reach "px" via rider's injected route.
+	conn := dialViaRoute(t, r, "outbound:rider", "example.com:443")
+	defer conn.Close()
+	require.Equal(t, "example.com:443", <-sawTarget, "rider's dial should ride its injected upstream route to px")
+
+	// An empty route yields no dialer — the outbound dials on its own.
+	require.Nil(t, r.OutboundUpstreamDialer(""), "empty outbound-level route must not produce a dialer")
+}
+
+// TestOutboundUpstreamDialerAccessInvalid: the "access" form resolves from
+// the pools a PROVIDER feeds; on an outbound-level route there is no such
+// spec, so the dial errors instead of guessing.
+func TestOutboundUpstreamDialerAccessInvalid(t *testing.T) {
+	r, _ := testRouter(t, nil, nil, nil, nil)
+	d := r.OutboundUpstreamDialer("access")
+	require.NotNil(t, d)
+	_, err := d.DialUpstream(context.Background(), "tcp", "example.com:443")
+	require.ErrorContains(t, err, "valid only on a provider")
+}
+
+// TestUpstreamDialerCycleGuard: a cyclic reference (an outbound routed
+// through a pool that contains the outbound itself) errors with a diagnostic
+// once the nesting depth cap is reached, instead of recursing until the
+// process dies. The testupstream plugin consumes the injected dialer, so the
+// recursion path is exactly what a real outbound plugin produces.
+func TestUpstreamDialerCycleGuard(t *testing.T) {
+	r, _ := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "cyc", Protocol: "testupstream", UpstreamProxy: "pool:cp",
+				Config: map[string]any{"id": "cyc"}},
+		},
+		[]*config.Pool{{ID: "cp", OutboundIDs: []string{"cyc"}}},
+		nil, nil)
+
+	d := r.UpstreamDialer(upstreamSpec("outbound:cyc"))
+	require.NotNil(t, d)
+	_, err := d.DialUpstream(context.Background(), "tcp", "example.com:443")
+	require.Error(t, err, "a cyclic route must fail, not succeed")
+	require.ErrorContains(t, err, "upstream_proxy", "the failure should surface as an upstream-route error")
+	// The depth cap fires with the cyclic-reference diagnostic; the wrapped
+	// error chain carries it up through the pool and outbound hops.
+	require.ErrorContains(t, err, "cyclic")
+}
+
+// TestUpstreamDialerDepthGuardAtCap: a context already at the depth cap
+// rejects the dial immediately — the guard itself, independent of how the
+// depth got there.
+func TestUpstreamDialerDepthGuardAtCap(t *testing.T) {
+	r, _ := testRouter(t, nil, nil, nil, nil)
+	d := r.UpstreamDialer(upstreamSpec("direct"))
+	require.NotNil(t, d)
+	ctx := context.WithValue(context.Background(), upstreamDepthKey{}, maxUpstreamDepth)
+	_, err := d.DialUpstream(ctx, "tcp", "example.com:443")
+	require.ErrorContains(t, err, "cyclic")
+}
+
+// TestUpstreamDialerChainHotReload: the chain route resolves live like the
+// others — editing the chain's pool applies to the next dial of an
+// already-resolved dialer.
+func TestUpstreamDialerChainHotReload(t *testing.T) {
+	r, cfg := testRouter(t,
+		[]*config.OutboundSpec{
+			{ID: "a", Protocol: "testdirect", Config: map[string]any{"id": "a"}},
+			{ID: "b", Protocol: "testdirect", Config: map[string]any{"id": "b"}},
+		},
+		[]*config.Pool{{ID: "cp", OutboundIDs: []string{"a"}}},
+		[]*config.ChainSpec{{ID: "cc", Layers: []string{"cp"}}},
+		nil)
+
+	d := r.UpstreamDialer(upstreamSpec("chain:cc"))
+	require.NotNil(t, d)
+
+	cfg.SetPool(&config.Pool{ID: "cp", OutboundIDs: []string{"b"}})
+	r.Rebuild()
+
+	conn, err := d.DialUpstream(context.Background(), "tcp", "example.com:443")
+	require.NoError(t, err)
+	conn.Close()
+	require.Equal(t, 1, fakeOutbound(t, r, "b").DialCount, "edited chain pool membership should apply to the next dial")
+	require.Zero(t, fakeOutbound(t, r, "a").DialCount)
 }

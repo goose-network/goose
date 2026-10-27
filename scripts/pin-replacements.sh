@@ -22,17 +22,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 pins=(
-  github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20261026144344-7d923b10a2d5
-  github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20261026144438-57057ba0eb1d
+  github.com/goose-network/goose-plugin-api=github.com/goose-network/goose-plugin-api@v0.0.0-20261027054714-59dcc8e8c232
+  github.com/goose-network/goose-plugin-psiphon=github.com/goose-network/psiphon@v0.0.0-20261027054733-949c5c6244cc
   github.com/Psiphon-Labs/psiphon-tunnel-core=github.com/goose-network/psiphon-tunnel-core@v0.0.0-20261026140314-5d979dcb6091
-  github.com/goose-network/goose-plugin-mihomo=github.com/goose-network/goose-plugin-mihomo@v0.0.0-20261026124232-79094f230b24
-  github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261026124251-8f50bf5efc05
+  github.com/goose-network/goose-plugin-mihomo=github.com/goose-network/goose-plugin-mihomo@v0.0.0-20261027054721-aa913d9801df
+  github.com/goose-network/goose-plugin-singbox=github.com/goose-network/goose-plugin-singbox@v0.0.0-20261027054728-ab0e54fddc31
   github.com/Psiphon-Labs/quic-go=github.com/goose-network/psiphon-quic-go@v0.0.0-20261026053528-9822823f4fad
   github.com/metacubex/mihomo=github.com/metacubex/mihomo@v0.0.0-20260922124647-afe94dafef8c
   github.com/sagernet/sing-box=github.com/sagernet/sing-box@v0.0.0-20260922113237-e5e705ed802d
-  github.com/geph-official/geph5-go=github.com/goose-network/geph5-go@v0.0.0-20261027021035-53b4a946b97d
-  github.com/goose-network/openrung-go=github.com/goose-network/openrung-go@v0.0.0-20261026124742-1328643f58ce
-  github.com/openrung/openrung/brokerapi=github.com/openrung/openrung/brokerapi@v0.7.1-0.20260923074427-404d84a15812
+  github.com/geph-official/geph5-go=github.com/goose-network/geph5-go@v0.0.0-20261027054738-f4690cab889f
+  github.com/goose-network/openrung-go=github.com/goose-network/openrung-go@v0.0.0-20261027054758-cbd08c361268
+  github.com/openrung/openrung/brokerapi=github.com/goose-network/openrung/brokerapi@v0.0.0-20261027055304-d2203a1d0596
 )
 
 # Map replace module -> sibling checkout directory (repo name only; all

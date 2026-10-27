@@ -43,28 +43,38 @@ type OutboundConfig = api.OutboundConfig
 type Provider = api.Provider
 
 // UpstreamDialer is re-exported from the api module: the dialer routing a
-// provider's own fetches through the upstream proxy configured on its spec
-// (config.ProviderSpec.UpstreamProxy). The engine resolves the reference
-// against live config and injects the dialer into the provider's config map
-// under the reserved "_upstream_dialer" key before instantiating the plugin;
-// URL-fetching providers type-assert it out with AsUpstreamDialer and wire it
-// as their HTTP transport's dialer so their downloads honor the route. The
-// key is absent (or the assertion fails) when no upstream proxy is
-// configured — fetch directly in that case.
+// plugin's own connections through an engine-managed upstream route (the
+// spec's upstream_proxy: a specific outbound, a pool, a multi-hop chain, or
+// a provider's access-pool fallback — the engine owns the reference's
+// semantics, re-resolved against live config per dial). The engine injects
+// the dialer into a config map under the reserved "_upstream_dialer" key
+// before instantiating the plugin:
+//
+//   - provider specs: the route a provider's own network rides (URL fetches,
+//     embedded-client tunnel dials, broker connections), so they reach
+//     blocked sources through a working proxy;
+//   - outbound specs: the route an outbound's own connection to its proxy
+//     server rides (the "access" form is provider-only there).
+//
+// Plugins type-assert it out with AsUpstreamDialer; an injected route
+// outranks the StackDialer. The key is absent (or the assertion fails) when
+// no upstream proxy is configured — fall back to the StackDialer, or dial
+// directly.
 //
 // The returned connection is a tunnel to address: the upstream's proxy
 // handshake has already been performed, and the target protocol (TLS, HTTP,
 // ...) runs over it directly.
 type UpstreamDialer = api.UpstreamDialer
 
-// UpstreamDialerKey is the reserved provider config-map key the engine uses
-// to inject an UpstreamDialer (config.ProviderSpec.UpstreamProxy) into a
-// provider before instantiation. Plugin configs must not use the
-// "_upstream_dialer" name for their own fields.
+// UpstreamDialerKey is the reserved provider/outbound config-map key the
+// engine uses to inject an UpstreamDialer into a plugin before
+// instantiation. Plugin configs must not use the "_upstream_dialer" name
+// for their own fields.
 const UpstreamDialerKey = api.UpstreamDialerKey
 
 // AsUpstreamDialer extracts the engine-injected upstream dialer from a
-// provider config map, or nil when no upstream proxy is configured.
+// provider or outbound config map, or nil when no upstream proxy is
+// configured.
 func AsUpstreamDialer(cfg map[string]any) UpstreamDialer {
 	return api.AsUpstreamDialer(cfg)
 }

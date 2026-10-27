@@ -31,12 +31,15 @@
 //
 // # Upstream routing
 //
-// When the provider spec sets an upstream_proxy (see config.ProviderSpec),
-// the engine injects a routed dialer into this provider's config map (see
-// pkg/plugin.AsUpstreamDialer). The subscription download then dials through
-// the engine route the spec names — a specific outbound, a pool, or the
-// access pool — instead of the engine host's local network, so blocked
-// subscription URLs (GFW-style) can be fetched through a working proxy.
+// The fetch always rides the engine: when the provider spec sets an
+// upstream_proxy (see config.ProviderSpec), the engine injects a routed
+// dialer into this provider's config map (see pkg/plugin.AsUpstreamDialer)
+// and the download dials through the route the spec names — a specific
+// outbound, a pool, a chain, or the access pool — instead of the engine
+// host's local network, so blocked subscription URLs (GFW-style) can be
+// fetched through a working proxy. Without a named route, the fetch still
+// uses the injected engine stack dialer (pkg/plugin.AsStackDialer) — the
+// system or gvisor stack — rather than a bare net.Dialer.
 //
 // # Config
 //
@@ -88,9 +91,10 @@ type Provider struct {
 //
 //	{"url":"https://...","prefix":"sub"}
 //
-// When the engine injected an upstream dialer (the spec's upstream_proxy is
-// set), the provider's HTTP transport dials through it; otherwise it uses
-// the default transport (direct fetches).
+// The fetch dials through the engine injection the spec resolved: the
+// upstream-route dialer (upstream_proxy) when the spec names a route, else
+// the engine stack dialer when one was injected, else the default transport
+// (direct fetches on the engine stack's system default).
 func New(cfg map[string]any) (pub.Provider, error) {
 	u, _ := cfg["url"].(string)
 	if u == "" {
@@ -101,15 +105,24 @@ func New(cfg map[string]any) (pub.Provider, error) {
 		prefix = defaultPrefix
 	}
 	client := &http.Client{Timeout: fetchTimeout}
+	var fetchDial func(ctx context.Context, network, address string) (net.Conn, error)
 	if d := pub.AsUpstreamDialer(cfg); d != nil {
 		// Route the fetch's TCP dials through the engine-resolved upstream.
+		fetchDial = d.DialUpstream
+	} else if s := pub.AsStackDialer(cfg); s != nil {
+		// No route named: still ride the engine stack (system or gvisor)
+		// rather than a bare net.Dialer, so gvisor deployments fetch
+		// through the userspace stack too.
+		fetchDial = s.Dial
+	}
+	if fetchDial != nil {
 		// Clone the default transport so its timeouts and HTTP/2 negotiation
-		// apply over the tunnel, but drop its ambient proxy support
-		// (HTTP_PROXY et al.): the upstream dialer is the route, and layering
+		// apply over the injected dialer, but drop its ambient proxy support
+		// (HTTP_PROXY et al.): the engine injection is the route, and layering
 		// an env proxy on top of it would double-proxy.
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.Proxy = nil
-		transport.DialContext = d.DialUpstream
+		transport.DialContext = fetchDial
 		client.Transport = transport
 	}
 	return &Provider{

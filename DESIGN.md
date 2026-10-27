@@ -227,19 +227,42 @@ Stale outbounds (present last poll, absent this poll) are removed. On
 `Outbounds` error the existing pool is kept (no drain, no crash).
 
 A provider spec may also set `upstream_proxy`, routing the provider's own
-URL fetches (the subscription download, the server-list fetch, ...) through
-an engine-managed route instead of the engine host's local network:
-`""`/`"direct"`, `"outbound:<id>"` (one specific proxy server), `"pool:<id>"`
-(the pool's selector with member failover, access filter included), or
-`"access"` (dial direct first, then fall back to the access pool of the
-pools this provider feeds). The router resolves the reference against live
-config at dial time and hands the provider a dialer injected into its
-config map under `pkg/plugin.UpstreamDialerKey`; URL-fetching plugins wire
-it as their HTTP transport's DialContext. The same
-selection/failover/access-filter machinery that serves user traffic thereby
-also serves provider fetches, so a URL blocked on the host network can flow
-through a reachable proxy — and edits to pools apply to the next fetch
-without restarting the provider, while editing the field restarts it.
+networking (the subscription download, the server-list fetch, an embedded
+client's tunnel dials, ...) through an engine-managed route instead of the
+engine host's local network. Outbound specs accept the same field: an
+outbound whose own proxy server must itself be reached through another proxy
+names its route there. The forms are:
+
+- `""` / `"direct"` — no route;
+- `"outbound:<id>"` — one specific proxy server, pinned;
+- `"pool:<id>"` — the pool's selector with member failover;
+- `"chain:<id>"` — a real multi-hop chain, layer by layer;
+- `"access"` (providers only) — dial direct first, then fall back to the
+  access pool of the pools this provider feeds;
+- a bare id — a pool of that name, else an outbound.
+
+The router resolves the reference against live config **at dial time** and
+injects the resolved dialer into the plugin's config map under
+`pkg/plugin.UpstreamDialerKey`. Resolutions may compose (a route dialing an
+outbound that itself has a route), and a context-bounded depth guard caps
+that recursion at 8 so cycles fail loudly instead of looping. Edits to pools
+apply to the next dial without restarting anything; editing the field
+restarts the provider.
+
+Together with the always-injected `pkg/plugin.StackDialerKey` dialer (the
+engine's layer-2/3/4 stack — system kernel or gvisor netstack), this is the
+plugin transport contract: **a plugin's own networking rides the engine
+stack, and the upstream proxy it needs comes from a goose route** — never a
+plugin-private raw address where the engine provides a dialer. The
+precedence in every plugin is route > stack > the plugin's own raw upstream
+or the system dialer. Two documented deviations shape real clients: the
+psiphon plugin *keeps* its raw `upstream_proxy` URL for the untunneled
+server-list/upgrade fetches its custom dialer cannot reach (the route owns
+the tunnel dials), and the tor plugin *drops* its raw SOCKS5 address under a
+route, since the route already is the upstream proxy and chaining a second
+hop inside it would double-proxy. QUIC-based outbounds (hysteria, hysteria2,
+tuic) ride neither a stack detour nor a route — their UDP transport cannot
+tunnel through a TCP route — and dial their own sockets.
 
 When the config store holds no providers at startup, the engine seeds the
 **default provider a plugin declared** through the plugin contract

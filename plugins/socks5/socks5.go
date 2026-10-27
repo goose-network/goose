@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"time"
 
-	pub "github.com/goose-network/goose/pkg/plugin"
 	"github.com/goose-network/goose/internal/core"
+	pub "github.com/goose-network/goose/pkg/plugin"
 )
 
 func init() {
@@ -35,12 +35,18 @@ type Outbound struct {
 	username string
 	password string
 	location *core.Location
-	dialer   dialer // engine stack dialer for reaching o.address
+	dialer   dialer             // engine stack dialer for reaching o.address
+	upstream pub.UpstreamDialer // engine upstream route for reaching o.address, outranking dialer
 }
 
 // New builds a SOCKS5 outbound from config:
 //
 //	{"id":"...","address":"host:port","username":"...","password":"..."}
+//
+// The router injects the engine stack dialer (StackDialerKey) and, when the
+// outbound spec carries upstream_proxy, the upstream-route dialer
+// (UpstreamDialerKey); the server connection rides the route when present,
+// else the engine stack, else the standard dialer.
 func New(cfg map[string]any) (core.Outbound, error) {
 	addr, _ := cfg["address"].(string)
 	if addr == "" {
@@ -52,16 +58,17 @@ func New(cfg map[string]any) (core.Outbound, error) {
 		username: str(cfg, "username"),
 		password: str(cfg, "password"),
 	}
-	if d, ok := cfg["_dialer"].(dialer); ok {
+	if d, ok := cfg[pub.StackDialerKey].(dialer); ok {
 		o.dialer = d
 	}
+	o.upstream = pub.AsUpstreamDialer(cfg)
 	return o, nil
 }
 
-func (o *Outbound) ID() string            { return o.id }
-func (o *Outbound) Protocol() string      { return "socks5" }
-func (o *Outbound) Address() string       { return o.address }
-func (o *Outbound) Location() *core.Location { return o.location }
+func (o *Outbound) ID() string                { return o.id }
+func (o *Outbound) Protocol() string          { return "socks5" }
+func (o *Outbound) Address() string           { return o.address }
+func (o *Outbound) Location() *core.Location  { return o.location }
 func (o *Outbound) Stats() core.OutboundStats { return core.OutboundStats{} }
 
 func (o *Outbound) DialContext(ctx context.Context, network core.Network, target string) (net.Conn, error) {
@@ -72,9 +79,14 @@ func (o *Outbound) DialContext(ctx context.Context, network core.Network, target
 	return o.connect(srv, target)
 }
 
-// dialServer reaches this proxy's own server through the configured engine
-// stack when one was injected, else the standard dialer.
+// dialServer reaches this proxy's own server: through the engine upstream
+// route when one was injected (the route's handshake is already done — the
+// returned conn is a tunnel to this server), else through the engine stack,
+// else the standard dialer.
 func (o *Outbound) dialServer(ctx context.Context) (net.Conn, error) {
+	if o.upstream != nil {
+		return o.upstream.DialUpstream(ctx, "tcp", o.address)
+	}
 	if o.dialer != nil {
 		return o.dialer.Dial(ctx, "tcp", o.address)
 	}
