@@ -41,19 +41,13 @@ import (
 //	@tag.name		providers
 //	@tag.description	Dynamic outbound providers (subscription links, tunnel-based sources) that populate managed pools
 //	@tag.name		metrics
-//	@tag.description	Recent proxied-request records
+//	@tag.description	Recent outbound metric rows: proxied requests and reachability probes
 //	@tag.name		exit-checks
 //	@tag.description	Exit-IP check results (the public IP observed at each outbound's exit) and on-demand check triggers
 
 // maxBodyBytes caps the size of an admin-API request body to prevent memory caps the size of an admin-API request body to prevent memory
 // exhaustion from oversized POST/PUT payloads.
 const maxBodyBytes = 1 << 20 // 1 MiB
-
-// probeReporter supplies the latest reachability-probe verdicts for
-// access-filtered pool members (the router implements it).
-type probeReporter interface {
-	ChainProbeStatus() []core.ProbeStatus
-}
 
 // providerStatusSource supplies the merged provider observability view (the
 // provider Manager implements it).
@@ -72,7 +66,6 @@ type Server struct {
 	cfg    *config.Store
 	ms     *metrics.Store
 	mux    *http.ServeMux
-	probes probeReporter
 	checks exitRunner
 	pstats providerStatusSource
 }
@@ -83,10 +76,6 @@ func New(cfg *config.Store, ms *metrics.Store) *Server {
 	s.routes()
 	return s
 }
-
-// SetProbeReporter wires the probe-status source (the router). Optional:
-// without it, GET /api/chains/probes reports an empty list.
-func (s *Server) SetProbeReporter(p probeReporter) { s.probes = p }
 
 // SetExitRunner wires the on-demand exit-check trigger (the exitip Manager).
 // Optional: without it, POST /api/exit-checks/run reports 503.
@@ -109,7 +98,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/pools/", s.pools)
 	s.mux.HandleFunc("/api/chains", s.chains)
 	s.mux.HandleFunc("/api/chains/", s.chains)
-	s.mux.HandleFunc("/api/chains/probes", s.chainProbes)
 	s.mux.HandleFunc("/api/providers", s.providers)
 	s.mux.HandleFunc("/api/providers/", s.providers)
 	// ServeMux prefers the more specific pattern, so this exact literal
@@ -632,8 +620,8 @@ func (s *Server) chains(w http.ResponseWriter, r *http.Request) {
 
 // listMetrics godoc
 //
-//	@Summary      List recent request metrics
-//	@Description  Returns up to n recent proxied-request records, newest first, each carrying the chain that served it. n defaults to 100; values above 10000 are capped; invalid values fall back to the default.
+//	@Summary      List recent outbound metrics
+//	@Description  Returns up to n recent outbound metric rows, newest first, each carrying the path that produced it: a proxied request's chain, or a reachability probe row whose chain starts with "local" (the engine's own network dialing an outbound's server). n defaults to 100; values above 10000 are capped; invalid values fall back to the default.
 //	@Tags         metrics
 //	@Produce      json
 //	@Param        n query int false "Number of records to return (default 100, max 10000)" default(100) maximum(10000)
@@ -658,7 +646,11 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	if n > maxMetricsRows {
 		n = maxMetricsRows
 	}
-	rec, err := s.ms.Recent(n)
+	// The explicit type keeps the core import resolvable for the swag
+	// annotation above (@Success {array} core.RequestMetric).
+	var rec []core.RequestMetric
+	var err error
+	rec, err = s.ms.Recent(n)
 	if err != nil {
 		writeJSON(w, errResponse{err.Error()}, http.StatusInternalServerError)
 		return
@@ -668,28 +660,6 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 // maxMetricsRows caps the number of metric rows a single API call can return.
 const maxMetricsRows = 10000
-
-// --- chain probes ---
-
-// listChainProbes godoc
-//
-//	@Summary      List reachability probes for access-filtered pool members
-//	@Description  Returns the latest auto-chain reachability verdict per probed outbound: whether the engine can dial the member's server directly and, when it cannot, whether an access-pool proxy can relay to it (and which one). Members whose server is unreachable both ways are dropped from routing; members reachable only via relay are routed through that relay (auto-built chain).
-//	@Tags         chains
-//	@Produce      json
-//	@Success      200 {array} core.ProbeStatus
-//	@Router       /api/chains/probes [get]
-func (s *Server) chainProbes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
-		return
-	}
-	if s.probes == nil {
-		writeJSON(w, []core.ProbeStatus{}, http.StatusOK)
-		return
-	}
-	writeJSON(w, s.probes.ChainProbeStatus(), http.StatusOK)
-}
 
 // --- exit checks ---
 

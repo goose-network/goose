@@ -35,11 +35,11 @@
 // upstream_proxy (see config.ProviderSpec), the engine injects a routed
 // dialer into this provider's config map (see pkg/plugin.AsUpstreamDialer)
 // and the download dials through the route the spec names — a specific
-// outbound, a pool, a chain, or the access pool — instead of the engine
-// host's local network, so blocked subscription URLs (GFW-style) can be
-// fetched through a working proxy. Without a named route, the fetch still
-// uses the injected engine stack dialer (pkg/plugin.AsStackDialer) — the
-// system or gvisor stack — rather than a bare net.Dialer.
+// outbound, a pool, or a chain — instead of the engine host's local network,
+// so blocked subscription URLs (GFW-style) can be fetched through a working
+// proxy. Without a named route, the fetch still uses the injected engine
+// stack dialer (pkg/plugin.AsStackDialer) — the system or gvisor stack —
+// rather than a bare net.Dialer.
 //
 // # Config
 //

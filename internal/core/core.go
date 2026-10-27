@@ -137,31 +137,14 @@ type RequestMetric struct {
 	FinishedAt time.Time     `json:"finishedAt"`
 }
 
-// ProbeVerdict is the outcome of one reachability probe dial.
-type ProbeVerdict struct {
-	// OK reports whether the dial succeeded.
-	OK bool `json:"ok"`
-	// Latency is how long the dial took.
-	Latency time.Duration `json:"latency"`
-	// Error is the dial error when OK is false.
-	Error string `json:"error"`
-	// At is when the probe ran.
-	At time.Time `json:"at"`
-}
-
-// ProbeStatus is the engine's latest reachability verdicts for one outbound
-// of an auto-chained pool (a pool with an access filter). Direct is the
-// probe from the local network to the outbound's server; Relay is the probe
-// through the pool's access proxy, meaningful only when Direct failed.
-// RelayVia is the access outbound that reached the server.
-type ProbeStatus struct {
-	OutboundID string       `json:"outboundID"`
-	Address    string       `json:"address"`
-	PoolID     string       `json:"poolID"`
-	Direct     ProbeVerdict `json:"direct"`
-	Relay      ProbeVerdict `json:"relay"`
-	RelayVia   string       `json:"relayVia"`
-}
+// HopLocal is the pseudo first-hop recorded on reachability-probe metric
+// rows: the engine's own (local) network dialed the outbound's proxy server,
+// rather than a request riding a proxy chain. A probe row's Chain is
+// [HopLocal, outboundID] and its Target is the outbound's server address, so
+// the outbound metrics table holds one row kind per measured path — single
+// hop, chain, and local reachability — and routing filters candidates by
+// exactly those rows.
+const HopLocal = "local"
 
 // ExitCheck is the persisted record of one exit-IP check: the public IP
 // observed when the engine dialed an exit-IP site through one outbound. A

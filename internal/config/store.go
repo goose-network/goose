@@ -27,6 +27,12 @@ type Engine struct {
 	// recording results. Zero value (disabled) keeps the engine from making
 	// any unsolicited outbound requests.
 	ExitChecks ExitCheckConfig `json:"exit_checks"`
+	// Probes configures scheduled reachability probes: the engine dials each
+	// outbound's proxy server from the local network and records the outcome
+	// as an outbound metric row (first hop "local"), so routing narrows a
+	// pool's first-hop candidates by measured reachability. Zero value
+	// (disabled) keeps the engine from making any unsolicited probe dials.
+	Probes ProbeConfig `json:"probes"`
 }
 
 type APIConfig struct {
@@ -106,11 +112,9 @@ type OutboundSpec struct {
 	// from the engine host. Empty (the default) keeps the pre-existing
 	// behavior: the server connection rides the engine stack alone. The
 	// reference forms are the same ones ProviderSpec.UpstreamProxy accepts
-	// (outbound:<id>, pool:<id>, chain:<id>, a bare id, or "direct"), minus
-	// "access" — that form resolves the access pool of the pools a
-	// *provider* feeds, and a static outbound feeds none. The engine
-	// resolves the reference at dial time against live config and injects
-	// the dialer into the plugin's config map under
+	// (outbound:<id>, pool:<id>, chain:<id>, a bare id, or "direct"). The
+	// engine resolves the reference at dial time against live config and
+	// injects the dialer into the plugin's config map under
 	// pkg/plugin.UpstreamDialerKey; outbound plugins that support an
 	// upstream (http, socks5, mihomo-*, singbox-*) reach their server
 	// through it, composing with the engine stack: the route's own first
@@ -119,50 +123,53 @@ type OutboundSpec struct {
 }
 
 // Pool is a named, ordered set of outbound IDs plus the filters and
-// selection strategy applied when picking from it.
+// selection strategy applied when picking from it. Pools are plain views
+// over the outbound set: one outbound may sit in several pools, and a pool
+// carries no reachability machinery of its own — which candidates are
+// usable from the local network is measured by probes and read back from
+// the outbound metrics (see ProbeConfig).
 type Pool struct {
 	ID          string       `json:"id"`
 	OutboundIDs []string     `json:"outbound_ids"`
 	Filters     []FilterSpec `json:"filters"`
 	Selector    SelectorSpec `json:"selector"`
-	// Access, when set, turns the pool into an auto-chained pool: the engine
-	// probes each member's server for direct reachability from the local
-	// network; members the local ISP cannot reach are dialed through an
-	// access proxy from Access.AccessPoolID (a relay hop is prepended
-	// automatically), and members reachable neither directly nor through the
-	// access pool are dropped from the pool's candidates.
-	Access *AccessFilterSpec `json:"access,omitempty"`
 }
 
-// AccessFilterSpec configures automatic proxy-chain building for a pool.
-type AccessFilterSpec struct {
-	// AccessPoolID is the pool of access (relay) proxies used to reach
-	// members whose servers the local network cannot dial directly (e.g.
-	// proxies behind an ISP block). Required; must reference an existing pool.
-	AccessPoolID string `json:"access_pool_id"`
-	// ProbeIntervalSec is seconds between reachability probe rounds.
-	// Default 300; minimum 10.
-	ProbeIntervalSec int `json:"probe_interval_seconds"`
-	// ProbeTimeoutSec bounds each probe dial. Default 5; minimum 1.
-	ProbeTimeoutSec int `json:"probe_timeout_seconds"`
+// ProbeConfig configures reachability probing of outbound proxy servers.
+// Each round dials every outbound's server from the engine's local network
+// and records the outcome as an outbound metric row whose first hop is
+// "local" (core.HopLocal), alongside the request and chain rows already in
+// the metrics store. Routing then filters a pool's first-hop candidates by
+// those measured verdicts — an outbound whose server the local network
+// cannot reach is dropped until a later round (or real traffic) says
+// otherwise — which is what makes a hidden relay pool unnecessary: a
+// server that needs a relay is simply reached through an explicit chain
+// (or an outbound's upstream_proxy), and its success is measured per hop.
+type ProbeConfig struct {
+	// Enabled turns scheduled probes on. Default false.
+	Enabled bool `json:"enabled"`
+	// IntervalSec is seconds between probe rounds. Default 300; minimum 10.
+	IntervalSec int `json:"interval_seconds"`
+	// TimeoutSec bounds each probe dial. Default 5; minimum 1.
+	TimeoutSec int `json:"timeout_seconds"`
 }
 
-// EffectiveProbeIntervalSec returns the probe interval with the default
-// applied and the floor enforced.
-func (a *AccessFilterSpec) EffectiveProbeIntervalSec() int {
-	if a.ProbeIntervalSec < 10 {
+// EffectiveIntervalSec returns the probe interval with the default applied
+// and the floor enforced.
+func (p ProbeConfig) EffectiveIntervalSec() int {
+	if p.IntervalSec < 10 {
 		return 300
 	}
-	return a.ProbeIntervalSec
+	return p.IntervalSec
 }
 
-// EffectiveProbeTimeoutSec returns the probe dial timeout with the default
+// EffectiveTimeoutSec returns the probe dial timeout with the default
 // applied and the floor enforced.
-func (a *AccessFilterSpec) EffectiveProbeTimeoutSec() int {
-	if a.ProbeTimeoutSec < 1 {
+func (p ProbeConfig) EffectiveTimeoutSec() int {
+	if p.TimeoutSec < 1 {
 		return 5
 	}
-	return a.ProbeTimeoutSec
+	return p.TimeoutSec
 }
 
 // ExitCheckConfig configures the engine's exit-IP check subsystem: for each
@@ -264,23 +271,18 @@ type ProviderSpec struct {
 	//     that id exists, else as an outbound (same precedence as chain
 	//     layers), so "pool:<id>" and "outbound:<id>" pin the meaning
 	//   - "pool:<id>":      pick an outbound from a pool (its selector, with
-	//     failover across members; the pool's access filter applies, so
-	//     members the local network cannot reach are dialed through the
-	//     pool's access proxies)
+	//     failover across members; candidates the local network cannot
+	//     reach are dropped by the measured reachability verdicts)
 	//   - "chain:<id>":     traverse a named chain layer by layer (real
 	//     multi-hop semantics: hop i CONNECTs toward hop i+1's server, the
 	//     last hop toward the fetch target)
-	//   - "access":         dial the fetch target directly first, and fall
-	//     back to the access pool of the pools this provider feeds (the
-	//     same direct-vs-relay testing the access filter does for pool
-	//     members) when the local network cannot reach it
 	//   - "direct":         always dial directly (explicit no-op form)
 	//
 	// The engine resolves the reference at dial time against live config, so
-	// pool membership and access-pool changes apply without restarting the
-	// provider; editing the reference itself restarts it. The resolved dialer
-	// is injected into the provider's config map for plugins that support
-	// routed fetches (see pkg/plugin.UpstreamDialer).
+	// pool membership changes apply without restarting the provider; editing
+	// the reference itself restarts it. The resolved dialer is injected into
+	// the provider's config map for plugins that support routed fetches (see
+	// pkg/plugin.UpstreamDialer).
 	UpstreamProxy string `json:"upstream_proxy"`
 	// Config is the plugin-specific provider configuration.
 	Config map[string]any `json:"config"`
@@ -684,7 +686,7 @@ func (s *Store) SetProviderOutbounds(providerID string, specs []*OutboundSpec) {
 	// Every pool built here becomes provider-managed: it is rebuilt from
 	// provider output on later polls and deleted when no provider feeds it
 	// anymore. A pre-existing operator pool targeted by a provider spec is
-	// adopted (its filters/selector/access survive rebuildProviderPoolLocked).
+	// adopted (its filters/selector survive rebuildProviderPoolLocked).
 	fed := make(map[string]struct{}, len(poolIDs))
 	for _, poolID := range poolIDs {
 		fed[poolID] = struct{}{}
@@ -716,7 +718,7 @@ func (s *Store) SetProviderOutbounds(providerID string, specs []*OutboundSpec) {
 
 // rebuildProviderPoolLocked recomputes pool poolID as the union of every
 // provider's managed outbounds whose spec still targets it, preserving any
-// user-configured Filters/Selector/Access. Callers hold s.mu. The pool is
+// user-configured Filters/Selector. Callers hold s.mu. The pool is
 // replaced by a fresh *Pool rather than mutated in place: the store hands
 // *Pool pointers to readers (Pool()/Pools()), which hold them beyond the
 // lock — mutating pool.OutboundIDs in place races with those readers.
@@ -758,12 +760,11 @@ func (s *Store) rebuildProviderPoolLocked(poolID string) {
 	// so it never adopts an operator-built pool.
 	s.managedPools[poolID] = struct{}{}
 	if existing, ok := s.pools[poolID]; ok {
-		// keep user-configured filters/selector/access; if the pool is
+		// keep user-configured filters/selector; if the pool is
 		// brand-new and has no selector, the router falls back to a
 		// round-robin-style fallback selector.
 		pool.Filters = existing.Filters
 		pool.Selector = existing.Selector
-		pool.Access = existing.Access
 	}
 	s.pools[poolID] = pool
 }

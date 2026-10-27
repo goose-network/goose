@@ -176,84 +176,6 @@ func TestUpstreamDialerUnknownRoute(t *testing.T) {
 	}
 }
 
-// TestUpstreamDialerAccessRouteDirectFirst: the "access" route dials the
-// fetch target directly when the local network reaches it — no proxy hop.
-func TestUpstreamDialerAccessRouteDirectFirst(t *testing.T) {
-	r, _ := testRouter(t,
-		[]*config.OutboundSpec{
-			{ID: "relay", Protocol: "testdirect", Config: map[string]any{"id": "relay"}},
-		},
-		[]*config.Pool{
-			// The pool the provider feeds; its access filter names the relay pool.
-			{ID: "fed", Access: &config.AccessFilterSpec{AccessPoolID: "relays"}},
-			{ID: "relays", OutboundIDs: []string{"relay"}},
-		},
-		nil, nil)
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-	go func() { c, _ := ln.Accept(); c.Write([]byte("access-direct")); c.Close() }()
-
-	spec := upstreamSpec("access")
-	spec.PoolIDs = []string{"fed"}
-	d := r.UpstreamDialer(spec)
-	require.NotNil(t, d)
-	conn, err := d.DialUpstream(context.Background(), "tcp", ln.Addr().String())
-	require.NoError(t, err)
-	defer conn.Close()
-	buf := make([]byte, 16)
-	n, _ := conn.Read(buf)
-	require.Equal(t, "access-direct", string(buf[:n]), "access route should dial directly when reachable")
-	require.Zero(t, fakeOutbound(t, r, "relay").DialCount, "relay member should not be dialed when the direct attempt succeeds")
-}
-
-// TestUpstreamDialerAccessRouteFallsBack: when the direct dial fails, the
-// access route falls back to the access pool of a pool the provider feeds.
-func TestUpstreamDialerAccessRouteFallsBack(t *testing.T) {
-	r, _ := testRouter(t,
-		[]*config.OutboundSpec{
-			{ID: "relay", Protocol: "testdirect", Config: map[string]any{"id": "relay"}},
-		},
-		[]*config.Pool{
-			{ID: "fed", Access: &config.AccessFilterSpec{AccessPoolID: "relays"}},
-			{ID: "relays", OutboundIDs: []string{"relay"}},
-		},
-		nil, nil)
-
-	unbound := unboundLoopbackAddr(t)
-	sawTarget := make(chan string, 1)
-	fo := fakeOutbound(t, r, "relay")
-	fo.OnDial = func(_ core.Network, target string) (net.Conn, error) {
-		sawTarget <- target
-		a, b := net.Pipe()
-		go a.Close()
-		return b, nil
-	}
-
-	spec := upstreamSpec("access")
-	spec.PoolIDs = []string{"fed"}
-	d := r.UpstreamDialer(spec)
-	require.NotNil(t, d)
-	conn, err := d.DialUpstream(context.Background(), "tcp", unbound)
-	require.NoError(t, err, "access route should fall back to the relay pool")
-	defer conn.Close()
-	require.Equal(t, unbound, <-sawTarget, "relay should dial the fetch target")
-}
-
-// TestUpstreamDialerAccessRouteNoAccessPool: direct fails and no fed pool
-// has an access filter: the error explains both, rather than silently
-// dialing through nothing.
-func TestUpstreamDialerAccessRouteNoAccessPool(t *testing.T) {
-	r, _ := testRouter(t, nil, nil, nil, nil)
-	unbound := unboundLoopbackAddr(t)
-
-	d := r.UpstreamDialer(upstreamSpec("access"))
-	require.NotNil(t, d)
-	_, err := d.DialUpstream(context.Background(), "tcp", unbound)
-	require.ErrorContains(t, err, "no access pool")
-}
-
 // TestUpstreamDialerHotReload: route resolution is live — a pool edit
 // applies to the next dial of an already-resolved dialer, without
 // re-creating the provider.
@@ -398,15 +320,16 @@ func TestOutboundUpstreamDialerInjection(t *testing.T) {
 	require.Nil(t, r.OutboundUpstreamDialer(""), "empty outbound-level route must not produce a dialer")
 }
 
-// TestOutboundUpstreamDialerAccessInvalid: the "access" form resolves from
-// the pools a PROVIDER feeds; on an outbound-level route there is no such
-// spec, so the dial errors instead of guessing.
-func TestOutboundUpstreamDialerAccessInvalid(t *testing.T) {
+// TestOutboundUpstreamDialerAccessIsBareID: the retired "access" form is now
+// just a bare id — resolved as a pool when one exists, else an outbound — so
+// with neither configured it errors as an unknown reference instead of
+// carrying special semantics.
+func TestOutboundUpstreamDialerAccessIsBareID(t *testing.T) {
 	r, _ := testRouter(t, nil, nil, nil, nil)
 	d := r.OutboundUpstreamDialer("access")
 	require.NotNil(t, d)
 	_, err := d.DialUpstream(context.Background(), "tcp", "example.com:443")
-	require.ErrorContains(t, err, "valid only on a provider")
+	require.ErrorContains(t, err, "not configured")
 }
 
 // TestUpstreamDialerCycleGuard: a cyclic reference (an outbound routed

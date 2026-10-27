@@ -2,8 +2,8 @@
 // engine-managed proxy instead of the local network.
 //
 // A ProviderSpec's upstream_proxy field references a specific outbound
-// ("outbound:x" or a bare id), a pool ("pool:x"), the access pool of the
-// pools the provider feeds ("access"), or an explicit "direct". The manager
+// ("outbound:x" or a bare id), a pool ("pool:x"), a chain ("chain:x"), or an
+// explicit "direct". The manager
 // resolves that reference into a pkg/plugin.UpstreamDialer — implemented by
 // the router against live config — and injects it into the provider's config
 // map under pkg/plugin.UpstreamDialerKey before instantiation, so
@@ -11,7 +11,7 @@
 // subscription/config through the configured route.
 //
 // Resolution of the reference happens at DIAL time, not once at provider
-// start, so pool membership changes, access-pool edits, and rebuilt outbounds
+// start, so pool membership changes, chain edits, and rebuilt outbounds
 // apply to running providers without a restart. Editing the reference itself
 // does restart the provider (providerChanged compares it).
 // The manager also injects the engine's layer-3/4 stack dialer

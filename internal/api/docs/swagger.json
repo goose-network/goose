@@ -137,29 +137,6 @@
                 }
             }
         },
-        "/api/chains/probes": {
-            "get": {
-                "description": "Returns the latest auto-chain reachability verdict per probed outbound: whether the engine can dial the member's server directly and, when it cannot, whether an access-pool proxy can relay to it (and which one). Members whose server is unreachable both ways are dropped from routing; members reachable only via relay are routed through that relay (auto-built chain).",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "chains"
-                ],
-                "summary": "List reachability probes for access-filtered pool members",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/core.ProbeStatus"
-                            }
-                        }
-                    }
-                }
-            }
-        },
         "/api/chains/{id}": {
             "get": {
                 "description": "Returns all configured proxy chains (ordered lists of pool layers).\nReturns the chain with the given id.\nCreates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector) or a single outbound server (pinned for that hop; when an id matches both, the pool wins). Layer 0 is the first hop; each subsequent layer is dialed through the previous.\nRemoves the chain with the given id. Inbounds whose policy still references it will fail to resolve until reconfigured.",
@@ -738,14 +715,14 @@
         },
         "/api/metrics": {
             "get": {
-                "description": "Returns up to n recent proxied-request records, newest first, each carrying the chain that served it. n defaults to 100; values above 10000 are capped; invalid values fall back to the default.",
+                "description": "Returns up to n recent outbound metric rows, newest first, each carrying the path that produced it: a proxied request's chain, or a reachability probe row whose chain starts with \"local\" (the engine's own network dialing an outbound's server). n defaults to 100; values above 10000 are capped; invalid values fall back to the default.",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "metrics"
                 ],
-                "summary": "List recent request metrics",
+                "summary": "List recent outbound metrics",
                 "parameters": [
                     {
                         "maximum": 10000,
@@ -1774,23 +1751,6 @@
                 }
             }
         },
-        "config.AccessFilterSpec": {
-            "type": "object",
-            "properties": {
-                "access_pool_id": {
-                    "description": "AccessPoolID is the pool of access (relay) proxies used to reach\nmembers whose servers the local network cannot dial directly (e.g.\nproxies behind an ISP block). Required; must reference an existing pool.",
-                    "type": "string"
-                },
-                "probe_interval_seconds": {
-                    "description": "ProbeIntervalSec is seconds between reachability probe rounds.\nDefault 300; minimum 10.",
-                    "type": "integer"
-                },
-                "probe_timeout_seconds": {
-                    "description": "ProbeTimeoutSec bounds each probe dial. Default 5; minimum 1.",
-                    "type": "integer"
-                }
-            }
-        },
         "config.ChainSpec": {
             "type": "object",
             "properties": {
@@ -1834,6 +1794,14 @@
                     "allOf": [
                         {
                             "$ref": "#/definitions/config.GeoConfig"
+                        }
+                    ]
+                },
+                "probes": {
+                    "description": "Probes configures scheduled reachability probes: the engine dials each\noutbound's proxy server from the local network and records the outcome\nas an outbound metric row (first hop \"local\"), so routing narrows a\npool's first-hop candidates by measured reachability. Zero value\n(disabled) keeps the engine from making any unsolicited probe dials.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.ProbeConfig"
                         }
                     ]
                 },
@@ -1966,7 +1934,7 @@
                     "type": "string"
                 },
                 "upstream_proxy": {
-                    "description": "UpstreamProxy routes this outbound's own connection to its proxy\nserver through an engine-managed route instead of dialing it directly\nfrom the engine host. Empty (the default) keeps the pre-existing\nbehavior: the server connection rides the engine stack alone. The\nreference forms are the same ones ProviderSpec.UpstreamProxy accepts\n(outbound:\u003cid\u003e, pool:\u003cid\u003e, chain:\u003cid\u003e, a bare id, or \"direct\"), minus\n\"access\" — that form resolves the access pool of the pools a\n*provider* feeds, and a static outbound feeds none. The engine\nresolves the reference at dial time against live config and injects\nthe dialer into the plugin's config map under\npkg/plugin.UpstreamDialerKey; outbound plugins that support an\nupstream (http, socks5, mihomo-*, singbox-*) reach their server\nthrough it, composing with the engine stack: the route's own first\nhop dials through the engine's system/gvisor stack.",
+                    "description": "UpstreamProxy routes this outbound's own connection to its proxy\nserver through an engine-managed route instead of dialing it directly\nfrom the engine host. Empty (the default) keeps the pre-existing\nbehavior: the server connection rides the engine stack alone. The\nreference forms are the same ones ProviderSpec.UpstreamProxy accepts\n(outbound:\u003cid\u003e, pool:\u003cid\u003e, chain:\u003cid\u003e, a bare id, or \"direct\"). The\nengine resolves the reference at dial time against live config and\ninjects the dialer into the plugin's config map under\npkg/plugin.UpstreamDialerKey; outbound plugins that support an\nupstream (http, socks5, mihomo-*, singbox-*) reach their server\nthrough it, composing with the engine stack: the route's own first\nhop dials through the engine's system/gvisor stack.",
                     "type": "string"
                 }
             }
@@ -1974,14 +1942,6 @@
         "config.Pool": {
             "type": "object",
             "properties": {
-                "access": {
-                    "description": "Access, when set, turns the pool into an auto-chained pool: the engine\nprobes each member's server for direct reachability from the local\nnetwork; members the local ISP cannot reach are dialed through an\naccess proxy from Access.AccessPoolID (a relay hop is prepended\nautomatically), and members reachable neither directly nor through the\naccess pool are dropped from the pool's candidates.",
-                    "allOf": [
-                        {
-                            "$ref": "#/definitions/config.AccessFilterSpec"
-                        }
-                    ]
-                },
                 "filters": {
                     "type": "array",
                     "items": {
@@ -1999,6 +1959,23 @@
                 },
                 "selector": {
                     "$ref": "#/definitions/config.SelectorSpec"
+                }
+            }
+        },
+        "config.ProbeConfig": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "description": "Enabled turns scheduled probes on. Default false.",
+                    "type": "boolean"
+                },
+                "interval_seconds": {
+                    "description": "IntervalSec is seconds between probe rounds. Default 300; minimum 10.",
+                    "type": "integer"
+                },
+                "timeout_seconds": {
+                    "description": "TimeoutSec bounds each probe dial. Default 5; minimum 1.",
+                    "type": "integer"
                 }
             }
         },
@@ -2025,7 +2002,7 @@
                     "type": "string"
                 },
                 "upstream_proxy": {
-                    "description": "UpstreamProxy routes the provider's own URL fetches (subscription\ndownload, server-list fetch, ...) through an engine-managed route\ninstead of dialing directly from the engine host. Empty (the default)\nkeeps direct fetches. The reference is one of:\n\n  - \"outbound:\u003cid\u003e\":  one specific proxy server (a configured outbound);\n    a bare id is also accepted — resolved as a pool when a pool with\n    that id exists, else as an outbound (same precedence as chain\n    layers), so \"pool:\u003cid\u003e\" and \"outbound:\u003cid\u003e\" pin the meaning\n  - \"pool:\u003cid\u003e\":      pick an outbound from a pool (its selector, with\n    failover across members; the pool's access filter applies, so\n    members the local network cannot reach are dialed through the\n    pool's access proxies)\n  - \"chain:\u003cid\u003e\":     traverse a named chain layer by layer (real\n    multi-hop semantics: hop i CONNECTs toward hop i+1's server, the\n    last hop toward the fetch target)\n  - \"access\":         dial the fetch target directly first, and fall\n    back to the access pool of the pools this provider feeds (the\n    same direct-vs-relay testing the access filter does for pool\n    members) when the local network cannot reach it\n  - \"direct\":         always dial directly (explicit no-op form)\n\nThe engine resolves the reference at dial time against live config, so\npool membership and access-pool changes apply without restarting the\nprovider; editing the reference itself restarts it. The resolved dialer\nis injected into the provider's config map for plugins that support\nrouted fetches (see pkg/plugin.UpstreamDialer).",
+                    "description": "UpstreamProxy routes the provider's own URL fetches (subscription\ndownload, server-list fetch, ...) through an engine-managed route\ninstead of dialing directly from the engine host. Empty (the default)\nkeeps direct fetches. The reference is one of:\n\n  - \"outbound:\u003cid\u003e\":  one specific proxy server (a configured outbound);\n    a bare id is also accepted — resolved as a pool when a pool with\n    that id exists, else as an outbound (same precedence as chain\n    layers), so \"pool:\u003cid\u003e\" and \"outbound:\u003cid\u003e\" pin the meaning\n  - \"pool:\u003cid\u003e\":      pick an outbound from a pool (its selector, with\n    failover across members; candidates the local network cannot\n    reach are dropped by the measured reachability verdicts)\n  - \"chain:\u003cid\u003e\":     traverse a named chain layer by layer (real\n    multi-hop semantics: hop i CONNECTs toward hop i+1's server, the\n    last hop toward the fetch target)\n  - \"direct\":         always dial directly (explicit no-op form)\n\nThe engine resolves the reference at dial time against live config, so\npool membership changes apply without restarting the provider; editing\nthe reference itself restarts it. The resolved dialer is injected into\nthe provider's config map for plugins that support routed fetches (see\npkg/plugin.UpstreamDialer).",
                     "type": "string"
                 }
             }
@@ -2105,54 +2082,6 @@
                 "NetworkTCP",
                 "NetworkUDP"
             ]
-        },
-        "core.ProbeStatus": {
-            "type": "object",
-            "properties": {
-                "address": {
-                    "type": "string"
-                },
-                "direct": {
-                    "$ref": "#/definitions/core.ProbeVerdict"
-                },
-                "outboundID": {
-                    "type": "string"
-                },
-                "poolID": {
-                    "type": "string"
-                },
-                "relay": {
-                    "$ref": "#/definitions/core.ProbeVerdict"
-                },
-                "relayVia": {
-                    "type": "string"
-                }
-            }
-        },
-        "core.ProbeVerdict": {
-            "type": "object",
-            "properties": {
-                "at": {
-                    "description": "At is when the probe ran.",
-                    "type": "string"
-                },
-                "error": {
-                    "description": "Error is the dial error when OK is false.",
-                    "type": "string"
-                },
-                "latency": {
-                    "description": "Latency is how long the dial took.",
-                    "allOf": [
-                        {
-                            "$ref": "#/definitions/time.Duration"
-                        }
-                    ]
-                },
-                "ok": {
-                    "description": "OK reports whether the dial succeeded.",
-                    "type": "boolean"
-                }
-            }
         },
         "core.RequestMetric": {
             "type": "object",
@@ -2310,7 +2239,7 @@
             "name": "providers"
         },
         {
-            "description": "Recent proxied-request records",
+            "description": "Recent outbound metric rows: proxied requests and reachability probes",
             "name": "metrics"
         },
         {

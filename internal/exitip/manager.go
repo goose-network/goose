@@ -53,9 +53,9 @@ type Recorder interface {
 
 // outboundSource supplies the outbounds to check and the dial path each
 // check uses; the router implements both (its outbound map keeps
-// engine-built outbounds live, and its dial path prepends the auto-chain
-// relay hop when the outbound's server is only reachable through an access
-// proxy). Only outbounds with a dial address participate; address-less
+// engine-built outbounds live, and its dial path is the same one dispatch
+// uses — upstream routes and chain hops included). Only outbounds with a
+// dial address participate; address-less
 // outbounds (direct, tunnels) have no distinct exit IP.
 type outboundSource interface {
 	// CheckOutbounds returns the outbounds to check (any order; the manager
@@ -290,7 +290,7 @@ func (m *Manager) fetchExitIP(ctx context.Context, out core.Outbound, site strin
 		return "", fmt.Errorf("bad site URL %q", site)
 	}
 	// Dial the site's host:80/443 through the outbound's dial path — the
-	// same one dispatch uses, relay hop included — then speak HTTP over it.
+	// same one dispatch uses — then speak HTTP over it.
 	trans := &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {

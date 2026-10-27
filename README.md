@@ -155,8 +155,7 @@ The reference forms mirror the rest of the engine's reference syntax:
 |---|---|
 | `""` / `"direct"` | dial the fetch target directly (the default) |
 | `"outbound:<id>"` | one specific proxy server |
-| `"pool:<id>"` | a pool: its selector picks a member, with failover across members; the pool's access filter applies |
-| `"access"` | dial direct first, then fall back to the access pool of the pools this provider feeds |
+| `"pool:<id>"` | a pool: its selector picks a member, with failover across members; members the local network cannot reach are dropped by the measured reachability verdicts |
 | bare id | a pool with that id when one exists, else an outbound (same precedence as chain layers) |
 
 References resolve at dial time against live config — a pool edit applies to
@@ -180,34 +179,51 @@ curl --socks5-hostname 127.0.0.1:11080 https://api.ipify.org
 The admin API (`GET /api/pools`, `/api/outbounds`, ...) reports the live
 pool, including outbounds contributed by providers.
 
-### Auto-built proxy chains (access pools)
+### Reachability metrics and explicit chains
 
-Some pool members' servers are directly reachable from the local network;
-others are blocked by the local ISP and can only be used through an access
-(relay) proxy. A pool with an `access` filter handles this automatically:
+Some proxy servers are directly reachable from the local network; others are
+blocked by the local ISP and can only be used through a relay proxy. The
+config model keeps no hidden relay pool for this: reachability is *measured*
+and recorded in the outbound metrics, and routing filters by those metrics.
+
+With probes enabled, each round dials every outbound's server from the
+engine's local network and records the outcome as a metric row whose chain
+is `["local", <outbound>]` — the same table (`GET /api/metrics`) that holds
+single-hop request rows and multi-hop chain rows:
 
 ```json
 {
-  "pools": [
-    { "id": "access", "outbound_ids": ["front-door"], "selector": { "type": "random" } },
-    {
-      "id": "work",
-      "outbound_ids": ["proxy-a", "proxy-b", "proxy-c"],
-      "selector": { "type": "random" },
-      "access": { "access_pool_id": "access", "probe_interval_seconds": 300, "probe_timeout_seconds": 5 }
-    }
+  "engine": {
+    "probes": { "enabled": true, "interval_seconds": 300, "timeout_seconds": 5 }
+  }
+}
+```
+
+A pool's first-hop candidates are then narrowed by the latest verdicts: an
+outbound whose server the local network cannot reach is dropped from
+first-hop selection until a later round — or a successful request — measures
+it reachable again. Fail-open: before anything is measured, every candidate
+stays admissible.
+
+Reaching a blocked server is explicit config, the same way the diagram
+shows chains: put the relay in front of it as a chain layer (or as the
+server's own `upstream_proxy`), and each hop's success is measured per hop:
+
+```json
+{
+  "outbounds": [
+    { "id": "front-door", "protocol": "socks5", "config": { "address": "203.0.113.9:1080" } },
+    { "id": "blocked", "protocol": "socks5", "config": { "address": "198.51.100.7:1080" } }
+  ],
+  "chains": [
+    { "id": "via-relay", "layers": ["front-door", "blocked"] }
   ]
 }
 ```
 
-The engine probes every member of the work pool — dialing its server
-directly and, when that fails, through each access-pool candidate. Routing
-follows the verdicts: directly reachable members are dialed single-hop,
-members reachable only via the access proxy get it prepended as a relay hop
-(engine → access → member → target), and members unreachable both ways are
-dropped from the pool. Probes repeat on the interval and on every config
-change; verdicts are visible on `GET /api/chains/probes`. Fail-open: before
-the first probe round completes, all members are treated as reachable.
+The `latency` filter (`min_success`, `max_ms`) narrows candidates by the same
+metrics on any pool or inbound policy, so a flaky hop stops serving traffic
+without any reachability machinery of its own.
 
 ### Exit-IP checks (cron)
 
@@ -229,8 +245,8 @@ per outbound, on a schedule, and record the history:
 }
 ```
 
-Each round dials every outbound *through the outbound itself* (relay hop
-included) and asks one of the configured "what is my IP" sites, rotating
+Each round dials every outbound *through the outbound itself* and asks one
+of the configured "what is my IP" sites, rotating
 round-robin across the list so large batches spread load instead of
 tripping one site's rate limits. Results are recorded per
 (outbound, site, exit IP, time) and served by `GET /api/exit-checks`

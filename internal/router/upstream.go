@@ -12,9 +12,9 @@
 //
 // The reference is resolved against live config at DIAL time — a running
 // provider's next fetch, and a built outbound's next server dial, see pool
-// edits, access-pool changes, and rebuilt outbounds without a restart. The
-// routes it can name mirror the engine's other reference forms (chain
-// layers, inbound policies):
+// edits and rebuilt outbounds without a restart. The routes it can name
+// mirror the engine's other reference forms (chain layers, inbound
+// policies):
 //
 //   - "" / "direct": dial the target directly through the engine
 //     stack (the pre-feature behavior)
@@ -22,16 +22,11 @@
 //     pool when a pool with that id exists, else as an outbound — the same
 //     precedence chain layers use
 //   - "pool:<id>": pick a member with the pool's own selector, with
-//     failover across members; the pool's access filter applies, so members
-//     the local network cannot reach directly are dialed through the access
-//     pool's proxies (auto-chain semantics)
+//     failover across members; candidates the local network cannot reach
+//     are dropped by the measured reachability verdicts
 //   - "chain:<id>": traverse a named chain layer by layer — real multi-hop
 //     semantics: hop i tunnels toward hop i+1's proxy-server address, and
 //     only the last hop connects toward the target
-//   - "access": (providers only) test-dial the target directly first, then
-//     fall back to the access pool of the pools this provider feeds — the
-//     same direct-then-relay reachability testing the access filter
-//     performs for pool members
 //
 // Nested routes (an upstream whose own server dial rides another route, a
 // chain whose hop outbounds carry upstreams) are bounded by maxUpstreamDepth
@@ -53,10 +48,6 @@ const (
 	// upstreamDialTimeout bounds a single member dial attempt, matching the
 	// budget of a normal router hop dial.
 	upstreamDialTimeout = 30 * time.Second
-	// directFirstTimeout bounds the direct attempt of the "access" route
-	// before falling back to the access pool: enough to tell
-	// locally-reachable from blocked without burning the fetch budget.
-	directFirstTimeout = 5 * time.Second
 	// upstreamTotalBudget bounds one whole fetch dial when the caller's
 	// context has no deadline, so a pool failover loop cannot run unbounded.
 	upstreamTotalBudget = 60 * time.Second
@@ -83,7 +74,7 @@ func (r *Router) UpstreamDialer(spec *config.ProviderSpec) pub.UpstreamDialer {
 	if spec == nil || spec.UpstreamProxy == "" {
 		return nil
 	}
-	return &routeDialer{r: r, route: spec.UpstreamProxy, spec: spec}
+	return &routeDialer{r: r, route: spec.UpstreamProxy}
 }
 
 // OutboundUpstreamDialer returns the dialer routing one outbound's own
@@ -91,8 +82,7 @@ func (r *Router) UpstreamDialer(spec *config.ProviderSpec) pub.UpstreamDialer {
 // config.OutboundSpec.UpstreamProxy), or nil for an empty route. The dialer
 // re-resolves the route against live config per dial, exactly like the
 // provider-side UpstreamDialer; the router injects it into the outbound's
-// config map under pub.UpstreamDialerKey at build time. The "access" form
-// is provider-only (an outbound feeds no pools) and errors at dial time.
+// config map under pub.UpstreamDialerKey at build time.
 func (r *Router) OutboundUpstreamDialer(route string) pub.UpstreamDialer {
 	if route == "" {
 		return nil
@@ -101,13 +91,10 @@ func (r *Router) OutboundUpstreamDialer(route string) pub.UpstreamDialer {
 }
 
 // routeDialer dials a plugin's own targets through the route it was built
-// from, re-resolved against the router's live state per dial. spec is
-// non-nil for provider routes (it feeds the "access" fallback); nil for
-// outbound-level routes.
+// from, re-resolved against the router's live state per dial.
 type routeDialer struct {
 	r     *Router
 	route string
-	spec  *config.ProviderSpec
 }
 
 // DialUpstream dials address (host:port) through the configured upstream
@@ -140,22 +127,16 @@ func (d *routeDialer) DialUpstream(ctx context.Context, network, address string)
 	if host, port, err := net.SplitHostPort(address); err == nil {
 		meta.TargetHost, meta.TargetPort = host, port
 	}
-	return d.r.dialUpstream(ctx, d.route, meta, d.spec)
+	return d.r.dialUpstream(ctx, d.route, meta)
 }
 
 // dialUpstream resolves route and dials meta's target through it. Every
 // route converges on the same first-hop machinery dispatch uses, so
-// access-filter narrowing and auto-chain relays behave identically for
-// fetches and for user traffic.
-func (r *Router) dialUpstream(ctx context.Context, route string, meta core.Metadata, spec *config.ProviderSpec) (net.Conn, error) {
-	switch {
-	case route == "" || route == "direct":
+// reachability narrowing behaves identically for fetches and for user
+// traffic.
+func (r *Router) dialUpstream(ctx context.Context, route string, meta core.Metadata) (net.Conn, error) {
+	if route == "" || route == "direct" {
 		return r.stack.Dial(ctx, string(meta.Network), meta.Target())
-	case route == "access":
-		if spec == nil {
-			return nil, fmt.Errorf("router: upstream_proxy access: valid only on a provider (feeds pools); an outbound has no pools to resolve an access route from")
-		}
-		return r.dialUpstreamAccess(ctx, meta, spec)
 	}
 	kind, id := splitRoute(route)
 	switch kind {
@@ -173,7 +154,7 @@ func (r *Router) dialUpstream(ctx context.Context, route string, meta core.Metad
 		}
 		return r.dialUpstreamOutbound(ctx, id, meta)
 	default:
-		return nil, fmt.Errorf("router: upstream_proxy %q: unknown prefix %q (want outbound:, pool:, chain:, access, or direct)", route, kind)
+		return nil, fmt.Errorf("router: upstream_proxy %q: unknown prefix %q (want outbound:, pool:, chain:, or direct)", route, kind)
 	}
 }
 
@@ -199,8 +180,7 @@ func (r *Router) dialUpstreamChain(ctx context.Context, id string, meta core.Met
 }
 
 // dialUpstreamOutbound pins one specific proxy server. The dial follows the
-// full first-hop path — including an auto-chain relay hop when that server
-// is only reachable through its pool's access proxies (CheckDial).
+// full first-hop path (CheckDial).
 func (r *Router) dialUpstreamOutbound(ctx context.Context, id string, meta core.Metadata) (net.Conn, error) {
 	out, ok := r.lookupOutbound(id)
 	if !ok {
@@ -224,36 +204,10 @@ func (r *Router) dialUpstreamPool(ctx context.Context, poolID string, meta core.
 	return r.dialPoolSnapshot(ctx, "pool "+poolID, snap, meta)
 }
 
-// dialUpstreamAccess implements the "access" route: try the fetch target
-// directly from the local network first — the engine host often sits on a
-// less restricted network than anything else — then fall back to the access
-// pool of the first pool this provider feeds that has an access filter,
-// mirroring the direct-vs-relay testing the access filter applies to pool
-// members.
-func (r *Router) dialUpstreamAccess(ctx context.Context, meta core.Metadata, spec *config.ProviderSpec) (net.Conn, error) {
-	directCtx, cancel := context.WithTimeout(ctx, directFirstTimeout)
-	conn, derr := r.stack.Dial(directCtx, string(meta.Network), meta.Target())
-	cancel()
-	if derr == nil {
-		return conn, nil
-	}
-
-	accessID := r.accessPoolForSpec(spec)
-	if accessID == "" {
-		return nil, fmt.Errorf("router: upstream_proxy access: direct dial %s failed: %w; no access pool configured on any pool the provider feeds", meta.Target(), derr)
-	}
-	snap, ok := r.snapshotPool(accessID)
-	if !ok {
-		return nil, fmt.Errorf("router: upstream_proxy access: direct dial %s failed: %w; access pool %q not configured", meta.Target(), derr, accessID)
-	}
-	return r.dialPoolSnapshot(ctx, "access pool "+accessID, snap, meta)
-}
-
 // poolSnapshot is an immutable snapshot of a built pool, taken under the
 // read lock so member dials can proceed without holding it (rebuild replaces
 // pools wholesale, so a snapshot never mutates under a dialer).
 type poolSnapshot struct {
-	bp         *builtPool
 	candidates []core.Outbound
 	filters    []core.Filter
 	selector   core.Selector
@@ -268,7 +222,6 @@ func (r *Router) snapshotPool(poolID string) (poolSnapshot, bool) {
 		return poolSnapshot{}, false
 	}
 	snap := poolSnapshot{
-		bp:         bp,
 		candidates: make([]core.Outbound, len(bp.outbounds)),
 		filters:    bp.filters,
 		selector:   bp.selector,
@@ -281,14 +234,11 @@ func (r *Router) snapshotPool(poolID string) (poolSnapshot, bool) {
 }
 
 // dialPoolSnapshot dials meta's target through a snapshotted pool: narrow
-// the members by the latest reachability probes when the pool is
-// access-filtered, apply the pool's own filters, then pick with the pool's
-// selector and fail over across the surviving members.
+// the members by the latest measured reachability verdicts (the route's
+// first hop rides the local network), apply the pool's own filters, then
+// pick with the pool's selector and fail over across the surviving members.
 func (r *Router) dialPoolSnapshot(ctx context.Context, what string, snap poolSnapshot, meta core.Metadata) (net.Conn, error) {
-	cands := snap.candidates
-	if snap.bp.access != nil {
-		cands = r.reachableCandidates(cands)
-	}
+	cands := r.reachableCandidates(snap.candidates)
 	if len(cands) == 0 {
 		return nil, fmt.Errorf("router: upstream_proxy %s: no reachable member", what)
 	}
@@ -342,24 +292,6 @@ func (r *Router) lookupPool(id string) (*builtPool, bool) {
 	defer r.mu.RUnlock()
 	bp, ok := r.pools[id]
 	return bp, ok
-}
-
-// accessPoolForSpec returns the access pool id of the first pool the spec
-// feeds that has an access filter configured, or "" when none does.
-func (r *Router) accessPoolForSpec(spec *config.ProviderSpec) string {
-	if spec == nil {
-		return ""
-	}
-	for _, poolID := range spec.EffectivePoolIDs() {
-		bp, ok := r.lookupPool(poolID)
-		if !ok {
-			continue
-		}
-		if bp.access != nil && bp.access.AccessPoolID != "" {
-			return bp.access.AccessPoolID
-		}
-	}
-	return ""
 }
 
 // splitRoute splits "kind:id" into kind and id; a value with no ":" is a

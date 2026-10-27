@@ -374,7 +374,7 @@ func TestProviderChangedOnUpstreamProxyEdit(t *testing.T) {
 	if providerChanged(spec(""), spec("")) {
 		t.Fatal("identical specs should not count as changed")
 	}
-	if !providerChanged(spec(""), spec("access")) {
+	if !providerChanged(spec(""), spec("pool:p")) {
 		t.Fatal("adding upstream_proxy must count as changed")
 	}
 	if !providerChanged(spec("outbound:a"), spec("outbound:b")) {

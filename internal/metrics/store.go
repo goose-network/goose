@@ -30,12 +30,22 @@ type Store struct {
 	// in-mem stats per outbound ID
 	mu    sync.RWMutex
 	stats map[string]*statsWindow
+	// reach is the latest measured local-reachability verdict per outbound
+	// ID, derived from the recorded metric rows (see observe). Routing
+	// filters a pool's first-hop candidates by it.
+	reach map[string]reachVerdict
 
 	// async write pipeline
 	in     chan core.RequestMetric
 	done   chan struct{}
 	sendMu sync.RWMutex // guards s.in against close-during-send
 	closed atomic.Bool
+}
+
+// reachVerdict is one outbound's latest local-reachability measurement.
+type reachVerdict struct {
+	ok bool
+	at time.Time
 }
 
 // statsWindow tracks a rolling window of latency samples for one outbound.
@@ -74,6 +84,7 @@ func Open(path string) (*Store, error) {
 	s := &Store{
 		db:    db,
 		stats: map[string]*statsWindow{},
+		reach: map[string]reachVerdict{},
 		in:    make(chan core.RequestMetric, writeBuf),
 		done:  make(chan struct{}),
 	}
@@ -123,13 +134,30 @@ func (s *Store) Record(m core.RequestMetric) error {
 	}
 }
 
-// observe updates the in-memory stats window for the first outbound in the
-// chain (the hop whose performance this request reflects).
+// observe updates the in-memory views for the outbound a metric row
+// measures. A request row's first hop (Chain[0]) is the outbound whose
+// performance and local reachability the row reflects; a probe row
+// (Chain[0] == core.HopLocal) measures Chain[1] instead — the engine's own
+// network dialing that outbound's server.
+//
+// Reachability verdicts are recorded from probe rows (both outcomes: a probe
+// is a bare TCP dial, so a failure really means unreachable) and from
+// successful request rows (a first hop that served traffic was reachable),
+// so real traffic revives an outbound a stale failed probe dropped, while a
+// handshake-level request failure never marks a server unreachable.
 func (s *Store) observe(m core.RequestMetric) {
 	if len(m.Chain) == 0 {
 		return
 	}
 	id := m.Chain[0]
+	probe := id == core.HopLocal
+	if probe {
+		if len(m.Chain) < 2 {
+			return
+		}
+		id = m.Chain[1]
+	}
+
 	s.mu.RLock()
 	w, ok := s.stats[id]
 	s.mu.RUnlock()
@@ -142,7 +170,6 @@ func (s *Store) observe(m core.RequestMetric) {
 		s.mu.Unlock()
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if len(w.samples) >= windowSize {
 		w.samples = w.samples[1:]
 	}
@@ -158,6 +185,26 @@ func (s *Store) observe(m core.RequestMetric) {
 	} else {
 		w.recent = w.recent/2 + m.Latency/2
 	}
+	w.mu.Unlock()
+
+	if probe || m.Success {
+		s.mu.Lock()
+		if prev, seen := s.reach[id]; !seen || !m.StartedAt.Before(prev.at) {
+			s.reach[id] = reachVerdict{ok: m.Success, at: m.StartedAt}
+		}
+		s.mu.Unlock()
+	}
+}
+
+// Reachability returns the latest measured verdict for dialing an outbound's
+// proxy server from the engine's local network, derived from the recorded
+// metric rows (probe rows and successful first hops). measured is false when
+// no row has touched the outbound yet; callers fail open in that case.
+func (s *Store) Reachability(id string) (ok bool, at time.Time, measured bool) {
+	s.mu.RLock()
+	v, seen := s.reach[id]
+	s.mu.RUnlock()
+	return v.ok, v.at, seen
 }
 
 // Stats returns a snapshot of the live performance view for an outbound.

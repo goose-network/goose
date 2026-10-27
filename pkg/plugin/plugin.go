@@ -44,17 +44,16 @@ type Provider = api.Provider
 
 // UpstreamDialer is re-exported from the api module: the dialer routing a
 // plugin's own connections through an engine-managed upstream route (the
-// spec's upstream_proxy: a specific outbound, a pool, a multi-hop chain, or
-// a provider's access-pool fallback — the engine owns the reference's
-// semantics, re-resolved against live config per dial). The engine injects
-// the dialer into a config map under the reserved "_upstream_dialer" key
-// before instantiating the plugin:
+// spec's upstream_proxy: a specific outbound, a pool, or a multi-hop chain —
+// the engine owns the reference's semantics, re-resolved against live config
+// per dial). The engine injects the dialer into a config map under the
+// reserved "_upstream_dialer" key before instantiating the plugin:
 //
 //   - provider specs: the route a provider's own network rides (URL fetches,
 //     embedded-client tunnel dials, broker connections), so they reach
 //     blocked sources through a working proxy;
 //   - outbound specs: the route an outbound's own connection to its proxy
-//     server rides (the "access" form is provider-only there).
+//     server rides.
 //
 // Plugins type-assert it out with AsUpstreamDialer; an injected route
 // outranks the StackDialer. The key is absent (or the assertion fails) when

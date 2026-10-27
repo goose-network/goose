@@ -85,7 +85,6 @@ func New(cfg *config.Store) (*Engine, error) {
 		done:      make(chan struct{}),
 	}
 	e.api = api.New(cfg, ms)
-	e.api.SetProbeReporter(rtr)
 	e.exitChecks = exitip.NewManager(ms, rtr)
 	e.exitChecks.Reconfigure(engCfg.ExitChecks)
 	e.api.SetExitRunner(e.exitChecks)

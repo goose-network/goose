@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,48 +12,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeProbes supplies fixed probe statuses for /api/chains/probes.
-type fakeProbes struct{ statuses []core.ProbeStatus }
+// TestMetricsListsProbeRows asserts the metrics surface carries reachability
+// probe rows (chain ["local", outbound]) alongside request rows — the probes
+// endpoint is gone because the metrics table is the single view.
+func TestMetricsListsProbeRows(t *testing.T) {
+	hs, _, ms := newAPIServer(t, "")
+	require.NoError(t, ms.Record(core.RequestMetric{
+		ID:        "p1",
+		Chain:     []string{core.HopLocal, "ob1"},
+		Target:    "1.2.3.4:1080",
+		Success:   false,
+		Error:     "blocked",
+		StartedAt: time.Now(),
+	}))
+	// DB writes are batched asynchronously; poll until the row surfaces.
+	require.Eventually(t, func() bool {
+		code, body := do(t, hs, "GET", "/api/metrics", "", nil)
+		return code == http.StatusOK &&
+			strings.Contains(string(body), `"local"`) &&
+			strings.Contains(string(body), `"ob1"`)
+	}, 5*time.Second, 100*time.Millisecond)
+}
 
-func (f *fakeProbes) ChainProbeStatus() []core.ProbeStatus { return f.statuses }
-
-// TestChainProbesEmptyWithoutReporter asserts the endpoint works (empty
-// array, 200) when no probe reporter is wired.
-func TestChainProbesEmptyWithoutReporter(t *testing.T) {
+// TestChainProbesRouteGone asserts the retired probes endpoint no longer
+// resolves to a probes view: the path falls into the chains subtree and
+// reports an unknown chain.
+func TestChainProbesRouteGone(t *testing.T) {
 	hs, _, _ := newAPIServer(t, "")
 	code, body := do(t, hs, "GET", "/api/chains/probes", "", nil)
-	require.Equal(t, http.StatusOK, code, string(body))
-	assert.Equal(t, "[]\n", string(body))
-}
-
-// TestChainProbesReportsStatuses asserts wired probe results are returned
-// verbatim.
-func TestChainProbesReportsStatuses(t *testing.T) {
-	hs, cfg, ms := newAPIServer(t, "")
-	srv := New(cfg, ms)
-	srv.SetProbeReporter(&fakeProbes{statuses: []core.ProbeStatus{{
-		OutboundID: "ob1",
-		Address:    "1.2.3.4:1080",
-		PoolID:     "work",
-		Direct:     core.ProbeVerdict{OK: false, Error: "blocked", At: time.Now()},
-		Relay:      core.ProbeVerdict{OK: true, Latency: 40 * time.Millisecond, At: time.Now()},
-		RelayVia:   "access1",
-	}}})
-	hs2 := httptest.NewServer(srv.Auth(""))
-	t.Cleanup(hs2.Close)
-
-	code, body := do(t, hs2, "GET", "/api/chains/probes", "", nil)
-	require.Equal(t, http.StatusOK, code, string(body))
-	assert.Contains(t, string(body), `"ob1"`)
-	assert.Contains(t, string(body), `"relayVia":"access1"`)
-	_ = hs
-}
-
-// TestChainProbesMethodNotAllowed asserts non-GET is rejected.
-func TestChainProbesMethodNotAllowed(t *testing.T) {
-	hs, _, _ := newAPIServer(t, "")
-	code, _ := do(t, hs, "POST", "/api/chains/probes", "", nil)
-	assert.Equal(t, http.StatusMethodNotAllowed, code)
+	assert.Equal(t, http.StatusNotFound, code, string(body))
 }
 
 // TestExitChecksListAndFilter asserts recorded checks are listed newest

@@ -235,10 +235,10 @@ names its route there. The forms are:
 
 - `""` / `"direct"` — no route;
 - `"outbound:<id>"` — one specific proxy server, pinned;
-- `"pool:<id>"` — the pool's selector with member failover;
+- `"pool:<id>"` — the pool's selector with member failover; members the
+  local network cannot reach are dropped by the measured reachability
+  verdicts;
 - `"chain:<id>"` — a real multi-hop chain, layer by layer;
-- `"access"` (providers only) — dial direct first, then fall back to the
-  access pool of the pools this provider feeds;
 - a bare id — a pool of that name, else an outbound.
 
 The router resolves the reference against live config **at dial time** and
@@ -307,27 +307,36 @@ placement variant: tor-go is tagged as its own versioned module
 module proxy with no local `replace` — the wiring every sibling plugin
 converges on once it is tagged.
 
-## Auto-built chains (access pools)
+## Reachability metrics (probes)
 
 Local networks reach only some proxy servers directly; an ISP may block the
-rest. A pool carrying an `access` filter (`access_pool_id`,
-`probe_interval_seconds`, `probe_timeout_seconds`) closes the gap without
-manual chain editing:
+rest. The config model carries no hidden relay pool for this — reachability
+is measured and recorded in the outbound metrics, and routing filters by
+those rows:
 
-- **Prober** (router-internal loop, `internal/router/probe.go`): for every
-  member of every access-filtered pool, dial the member's server (a) through
-  the engine stack ("direct") and, on failure, (b) through each access-pool
-  candidate ("relay"). Rounds run on the smallest configured interval and
-  are nudged on rebuild so new members are probed promptly. Verdicts are
-  kept per outbound and exposed via `GET /api/chains/probes`.
-- **Dispatch** narrows each access-filtered pool to its reachable members
-  (fail-open before the first verdict) and prepends the recorded relay
-  (engine → access → member) for members that need it. Members unreachable
-  both ways are dropped rather than dialed-into-failure.
-- **Per-hop dialing** (`dialLayers`): a chain's layers are selected up
-  front, so hop *i* CONNECTs toward hop *i+1*'s proxy-server address — real
-  multi-hop semantics. The relay-prepended auto chain is exactly this with
-  the access proxy as hop 0.
+- **Prober** (router-internal loop, `internal/router/probe.go`), driven by
+  `engine.probes` (disabled by default): each round dials every outbound's
+  server through the engine stack and records the outcome as a metric row
+  whose chain is `[core.HopLocal, outboundID]` and whose target is the
+  server address — one row kind per measured path in the same table as
+  single-hop and chain request rows (`GET /api/metrics`). Rounds run on the
+  configured interval and are nudged on rebuild so new outbounds are probed
+  promptly.
+- **Metrics store** (`internal/metrics`) derives a per-outbound
+  reachability verdict from those rows: probe rows record both outcomes (a
+  probe is a bare TCP dial, so a failure really means unreachable), and a
+  successful request's first hop proves reachability too — real traffic
+  revives an outbound a stale failed probe dropped, while a handshake-level
+  request failure never marks a server unreachable.
+- **Dispatch** narrows a chain's first layer — the only hop dialed from the
+  local network — to candidates whose latest verdict is not a failure
+  (fail-open before the first verdict). Later hops ride the previous
+  tunnel, where local reachability says nothing.
+- **Reaching a blocked server is explicit config**: a chain layer in front
+  of it, or the outbound's own `upstream_proxy`. Per-hop dialing
+  (`dialLayers`) selects every layer up front, so hop *i* CONNECTs toward
+  hop *i+1*'s proxy-server address — real multi-hop semantics — and each
+  hop's outcome lands in the metrics as a chain row.
 
 ## Exit-IP checks
 
@@ -340,8 +349,8 @@ IP, latency, time)` tuples:
   or a fixed interval; an immediate first round populates data without
   waiting out the schedule. Hot-reloads on config bumps without losing the
   cron phase; invalid cron is rejected at the API (400).
-- **Checks dial through the outbound** via the router's dispatch dial path
-  (relay hop included), then GET a plain-text "what is my IP" site with
+- **Checks dial through the outbound** via the router's dispatch dial path,
+  then GET a plain-text "what is my IP" site with
   `curl`-ish UA and validate the response with `net.ParseIP`. Browsers
   cannot route `fetch()` through an arbitrary SOCKS5/HTTP proxy, so checks
   run engine-side; the frontend reads results through the admin API.
