@@ -5,8 +5,10 @@
 *.test
 *.out
 
-# Go workspace
+# Go workspace (local dev against sibling checkouts; see README)
 /vendor/
+/go.work
+/go.work.sum
 
 # Local databases / runtime state
 *.db

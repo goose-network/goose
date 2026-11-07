@@ -3,8 +3,8 @@ module github.com/goose-network/goose
 go 1.26.0
 
 require (
-	github.com/goose-network/goose-plugin-api v0.0.0
-	github.com/goose-network/goose-plugin-psiphon v0.0.0
+	github.com/goose-network/goose-plugin-api v0.0.1
+	github.com/goose-network/goose-plugin-psiphon v0.0.1
 	github.com/goose-network/tor-go v0.0.8
 	github.com/stretchr/testify v1.12.1
 	go.etcd.io/bbolt v1.4.0
@@ -94,7 +94,7 @@ require (
 	github.com/metacubex/jls-tls v0.0.0-20260723084315-67adc0e2f796 // indirect
 	github.com/metacubex/jsonv2 v0.0.0-20260721082349-16b4998c8f89 // indirect
 	github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604 // indirect
-	github.com/metacubex/mihomo v0.0.0 // indirect
+	github.com/metacubex/mihomo v0.0.0-20260922124647-afe94dafef8c // indirect
 	github.com/metacubex/mipstack v0.0.0-20260922000335-dbef50b1df45 // indirect
 	github.com/metacubex/mlkem v0.1.0 // indirect
 	github.com/metacubex/qpack v0.6.0 // indirect
@@ -171,7 +171,7 @@ require (
 	github.com/sagernet/quic-go v0.61.0-sing-box-mod.7 // indirect
 	github.com/sagernet/sing v0.9.6-0.20260922013359-4ca3bebe0b8e // indirect
 	github.com/sagernet/sing-anytls v0.0.0-20260904135308-cec2d74334be // indirect
-	github.com/sagernet/sing-box v0.0.0 // indirect
+	github.com/sagernet/sing-box v0.0.0-20260922113237-e5e705ed802d // indirect
 	github.com/sagernet/sing-cloudflared v0.1.3-0.20260706062323-d9787e794aa3 // indirect
 	github.com/sagernet/sing-mux v0.3.9-0.20260919141002-baf887b90a62 // indirect
 	github.com/sagernet/sing-openconnect v0.0.0-20260903200519-8b89c968949d // indirect
@@ -258,16 +258,16 @@ require (
 	github.com/flynn/noise v1.0.1-0.20220214164934-d803f5c4b0f4 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gaukas/godicttls v0.0.4 // indirect
-	github.com/geph-official/geph5-go v0.0.0
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/goose-network/goose-plugin-mihomo v0.0.0
-	github.com/goose-network/goose-plugin-singbox v0.0.0
-	github.com/goose-network/openrung-go v0.0.0
+	github.com/goose-network/geph5-go v0.0.1
+	github.com/goose-network/goose-plugin-mihomo v0.0.1
+	github.com/goose-network/goose-plugin-singbox v0.0.1
+	github.com/goose-network/openrung-go v0.0.1
 	github.com/grafov/m3u8 v0.0.0-20171211212457-6ab8f28ed427 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/kamstrup/intmap v0.5.2 // indirect
@@ -329,24 +329,21 @@ require (
 	tailscale.com v1.58.2 // indirect
 )
 
-replace github.com/goose-network/goose-plugin-api => ../goose-plugin-api
-
-replace github.com/goose-network/goose-plugin-psiphon => ../psiphon
-
-replace github.com/Psiphon-Labs/psiphon-tunnel-core => ../psiphon-tunnel-core
-
-replace github.com/goose-network/goose-plugin-mihomo => ../mihomo-plugin
-
-replace github.com/goose-network/goose-plugin-singbox => ../singbox-plugin
-
-replace github.com/metacubex/mihomo => ../mihomo
-
-replace github.com/sagernet/sing-box => ../sing-box
+// Structural fork redirects — the only replaces this module needs. Each
+// left side is an upstream module path whose goose-network fork carries
+// engine-specific patches; the fetched replacement declares the upstream
+// path, so the redirect is how the fork is consumed at a remote pin. A main
+// module's replace list is the only one that applies, so forks reached
+// through the plugin modules must be redirected here too.
+//
+// psiphon-tunnel-core: Config.SetCustomDialer and Controller.HasActiveTunnel
+// (engine-route dialing, per-controller teardown probing) exist only on the
+// fork. quic-go: http3 ported to the qpack v0.6.0 decoder API so Psiphon's
+// QUIC transports coexist with mihomo's qpack v0.6.0 in one binary.
+// brokerapi: NewHTTPClientWithBaseDialer (broker RPCs through engine
+// routes) exists only on the fork.
+replace github.com/Psiphon-Labs/psiphon-tunnel-core => github.com/goose-network/psiphon-tunnel-core v0.0.0-20261026140314-5d979dcb6091
 
 replace github.com/Psiphon-Labs/quic-go => github.com/goose-network/psiphon-quic-go v0.0.0-20261026053528-9822823f4fad
 
-replace github.com/geph-official/geph5-go => ../geph5-go
-
-replace github.com/goose-network/openrung-go => ../openrung-go
-
-replace github.com/openrung/openrung/brokerapi => ../openrung/brokerapi
+replace github.com/openrung/openrung/brokerapi => github.com/goose-network/openrung/brokerapi v0.0.0-20261027055304-d2203a1d0596

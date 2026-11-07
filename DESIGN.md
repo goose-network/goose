@@ -275,7 +275,7 @@ build engines directly and must not spontaneously start live tunnels. An
 explicitly configured provider always wins, and `GOOSE_NO_DEFAULT_PROVIDER=1`
 opts out entirely.
 
-See the [Psiphon provider plugin](../psiphon) for a real example: it starts
+See the [Psiphon provider plugin](../goose-plugin-psiphon) for a real example: it starts
 a tunnel-core tunnel with the background remote-server-list fetcher enabled
 (so the server list auto-updates like the Psiphon Windows client) and
 exposes the tunnel's local SOCKS proxy as a single socks5 outbound in the
@@ -288,8 +288,8 @@ as a single socks5 outbound — but only after the first tunnel to a geph5 exit
 is live, since CONNECTs fail before that; readiness is reported via the
 `Watch()` signal so the pool fills as soon as the tunnel comes up. It also
 demonstrates the variant of plugin placement where the plugin lives inside
-the embedded project's repo (to use its `internal/` packages) and goose pulls
-it in via `require` + `replace`. Its `embedded_exit` config option goes one
+the embedded project's repo (to use its `internal/` packages), with goose
+requiring it from the module proxy at its published tag. Its `embedded_exit` config option goes one
 step further and boots the geph5 exit itself (a Go port of the Rust
 `geph5-exit` serving path) inside the engine's process, pinned by an
 auto-generated direct constraint — the fully standalone deployment where
@@ -304,8 +304,7 @@ retried with backoff inside the provider, so a dead network leaves the pool
 empty rather than killing the provider. It demonstrates the *published*
 placement variant: tor-go is tagged as its own versioned module
 (`github.com/goose-network/tor-go`), so goose requires it directly from the
-module proxy with no local `replace` — the wiring every sibling plugin
-converges on once it is tagged.
+module proxy with no local `replace` — as every sibling plugin now is.
 
 ## Reachability metrics (probes)
 

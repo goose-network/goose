@@ -1,11 +1,10 @@
 name: Docker
 
 # On every push to main: build a multi-arch (linux/amd64 + linux/arm64)
-# goose engine image and publish it to GHCR. The Dockerfile re-points the
-# local replace directives at published pins via scripts/pin-replacements.sh
-# (same source of truth as the OpenAPI workflow), cross-compiles from the
-# runner's native arch (CGO disabled — no QEMU needed), and stages the
-# binary into distroless static.
+# goose engine image and publish it to GHCR. The Dockerfile cross-compiles
+# from the runner's native arch (CGO disabled — no QEMU needed) with every
+# dependency resolving from the module proxy at its published version, and
+# stages the binary into distroless static.
 on:
   push:
     branches: [main]

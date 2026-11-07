@@ -18,6 +18,14 @@ The Go 1.26.8 toolchain pin is required because the bundled Psiphon
 provider plugin pulls in `psiphon-tunnel-core`, whose `psiphon-tls` is
 ABI-incompatible with Go 1.27.
 
+Every dependency — the plugin modules included — resolves from the module
+proxy at its published version. To develop against a local sibling checkout
+(e.g. a plugin repo cloned next to this one), use a Go workspace instead of
+editing go.mod: `go work init . ../mihomo-plugin` (or
+`go work use ./...` with the sibling paths) builds the workspace members
+against your local trees while the committed go.mod stays clean. The
+workspace files are gitignored.
+
 ## Docker
 
 CI publishes a multi-arch (`linux/amd64`, `linux/arm64`) engine image to
@@ -64,11 +72,10 @@ engine config.
 Only the admin API port is declaratively exposed; inbound proxy ports are
 config-driven — publish them with `-p` as they appear in your config.
 
-The build re-points the dev-tree replace directives at published pins via
-`scripts/pin-replacements.sh` (single source of truth; the OpenAPI and
-Docker workflows use the same script) and cross-compiles, so no QEMU is
-involved. The one private dependency (`openrung-go`) is fetched with an
-authenticated git BuildKit secret.
+All plugin dependencies resolve from the module proxy at their published
+tags — nothing is re-pointed at build time. The cross-compile is pure Go
+(CGO disabled), so no QEMU is involved. The one private dependency
+(`openrung-go`) is fetched with an authenticated git BuildKit secret.
 
 ## Run
 
@@ -128,7 +135,7 @@ Every field of the psiphon `config` is optional; with no `config_path` the
 provider embeds the production Psiphon network parameters (channel, sponsor,
 remote-server-list URLs and signing keys, extracted from the official
 client) and fetches the server list itself — see
-[the plugin README](../psiphon/README.md).
+[the plugin README](../goose-plugin-psiphon/README.md).
 
 ### Routed provider fetches (`upstream_proxy`)
 
@@ -380,7 +387,7 @@ acyclic.
   named by the spec's `pool_ids` (one provider can feed several pools).
 
 Built-in protocols (`direct`, `http`, `socks5`) live under `plugins/`. The
-bundled [Psiphon provider](../psiphon), the
+bundled [Psiphon provider](../goose-plugin-psiphon), the
 [geph provider](../geph5-go/plugins/geph) (part of the geph5-go client port),
 and the [tor provider](../tor-go/plugins/tor) (part of the tor-go client)
 are wired in by default.
@@ -389,17 +396,19 @@ are wired in by default.
 
 1. Create a module importing only `goose-plugin-api`; implement `Provider`;
    register in `init()` with `plugin.RegisterProvider`.
-2. In goose's `go.mod`, add a `require` pointing at the plugin — a local
-   `replace` only while it is unpublished (tor-go is required straight from
-   the module proxy; the geph and Psiphon plugins still use a replace).
+2. Tag the plugin repo at a version and add a plain `require` for it in
+   goose's `go.mod` — every bundled plugin (api, psiphon, mihomo, singbox,
+   geph, openrung, tor) is published and required straight from the module
+   proxy; only fork-patched upstream modules carry a `replace` (see go.mod).
 3. Add `_ "your/plugin/module"` to `include/register.go`.
 
-A plugin may be its own repo (Psiphon) or live inside the project it embeds —
+A plugin may be its own repo (goose-plugin-psiphon, goose-plugin-mihomo,
+goose-plugin-singbox, openrung-go) or live inside the project it embeds —
 the geph provider sits in geph5-go's `plugins/geph` and the tor provider in
 tor-go's `plugins/tor`, because each embeds that module's `internal/` client
-packages. The tor provider also demonstrates the published variant: tor-go is
-tagged as `github.com/goose-network/tor-go`, so goose requires the versioned
-module directly (no `replace`) — plain `require` + blank-import wiring.
+packages. Each is tagged as a versioned module, so goose requires it
+directly from the module proxy (no `replace`) — plain `require` +
+blank-import wiring.
 
 ## Tests
 

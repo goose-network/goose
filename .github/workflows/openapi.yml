@@ -52,15 +52,7 @@ jobs:
             git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf https://github.com/
           fi
 
-      # The go.mod replace directives point at sibling checkouts that do
-      # not exist on CI. Re-point them at the published GitHub repos, pinned
-      # to the exact revisions the local tree was tested against; the pin
-      # list lives in scripts/pin-replacements.sh (the Dockerfile uses the
-      # same script, so the two cannot drift).
-      - name: Re-point local replace directives at published repos
-        run: scripts/pin-replacements.sh
-
-      - name: Resolve pinned modules
+      - name: Resolve modules
         run: go mod tidy
 
       - name: Install swag

@@ -5,13 +5,10 @@
 #     --secret id=github_token,src=<token-file> \
 #     -t ghcr.io/goose-network/goose:main .
 #
-# The committed go.mod points the replaced modules at sibling checkouts
-# (../goose-plugin-api, ../geph5-go, ...) that only exist in the dev tree.
-# scripts/pin-replacements.sh re-points them at the published GitHub
-# repositories, pinned to the exact revisions the local tree was tested
-# against; it is the single source of truth for the pins (CI workflows call
-# it too). The github_token secret is only needed for the one private
-# dependency (openrung-go); everything else resolves through the Go module
+# All dependencies resolve through the Go module proxy at the versions
+# committed in go.mod — nothing is re-pointed at build time. The
+# github_token secret is only needed for the one private dependency
+# (openrung-go), which GOPRIVATE routes to authenticated git instead of the
 # proxy. The token is a BuildKit secret mount, consumed through the
 # environment, so it never lands in an image or cache layer.
 #
@@ -33,28 +30,26 @@ ENV GOPROXY=${GOPROXY}
 
 WORKDIR /src
 COPY go.mod go.sum ./
-COPY scripts/ scripts/
-
-# Re-point the sibling replace directives at the published pins. Pure
-# go mod edit: no network, no source needed, so this layer only rebuilds
-# when the pins change.
-RUN scripts/pin-replacements.sh
 
 COPY . .
 
-# go mod tidy runs inside scripts/pin-replacements.sh --tidy, as a child
-# of the script so it inherits the private-repo git credentials — exports
-# do not survive into this RUN shell. Tidy needs the source present: it
-# computes the require set from the import graph and records the pinned
-# versions' checksums in go.sum. The module cache rides a BuildKit cache
-# mount so rebuilt images skip re-downloading the world. The token secret
-# authenticates the private openrung-go fetch through git's environment.
+# Tidy needs the source present: it computes the require set from the
+# import graph and records the resolved versions' checksums in go.sum.
+# The module cache rides a BuildKit cache mount so rebuilt images skip
+# re-downloading the world. The token secret authenticates the private
+# openrung-go fetch: GOPRIVATE keeps it off the module proxy and sum
+# database (both 404 on private repos), and the GIT_CONFIG_* pair hands
+# git the credential through its environment.
 RUN --mount=type=cache,sharing=locked,id=modcache-${TARGETOS}-${TARGETARCH},target=/go/pkg/mod \
     --mount=type=secret,id=github_token \
     if [ -f /run/secrets/github_token ]; then \
       export GOSE_GITHUB_TOKEN="$(cat /run/secrets/github_token)"; \
+      export GOPRIVATE=github.com/goose-network/openrung-go; \
+      export GIT_CONFIG_COUNT=1; \
+      export GIT_CONFIG_KEY_0="url.https://x-access-token:${GOSE_GITHUB_TOKEN}@github.com/.insteadOf"; \
+      export GIT_CONFIG_VALUE_0="https://github.com/"; \
     fi; \
-    scripts/pin-replacements.sh --tidy && \
+    go mod tidy && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -tags with_quic -o /out/goose ./cmd/goose && \
     mkdir -p /out/state
