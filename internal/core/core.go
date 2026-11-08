@@ -10,7 +10,11 @@
 package core
 
 import (
+	"errors"
+	"fmt"
 	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	api "github.com/goose-network/goose-plugin-api"
@@ -157,6 +161,105 @@ type ExitCheck struct {
 	// "ifconfig.me").
 	Site      string        `json:"site"`
 	ExitIP    string        `json:"exitIP"`
+	Success   bool          `json:"success"`
+	Error     string        `json:"error"`
+	Latency   time.Duration `json:"latency"`
+	StartedAt time.Time     `json:"startedAt"`
+}
+
+// HopProbe is the pseudo first-hop recorded on HTTP probe metric rows: the
+// engine issued an application-level HTTP request toward a target through a
+// route (an outbound, a pool, a chain, or its own stack). A probe row's Chain
+// is [HopProbe, route] and its Target is the target's host:port, like every
+// other metric row; the full URL lives on the HTTPProbe record.
+//
+// These rows are informational: unlike a HopLocal row (a bare TCP dial of an
+// outbound's own server, where a failure really means "the local network
+// cannot reach it"), an HTTP probe can fail because of the TARGET — a blocked
+// site, a TLS mismatch, a 5xx — while the route itself is perfectly usable.
+// Feeding those failures into the reachability verdicts would drop a healthy
+// outbound from routing because one probed site disliked it, so the metrics
+// store records the rows for display and skips them for verdicts.
+const HopProbe = "probe"
+
+// HTTPProbeSpec is one HTTP reachability probe round: issue this request
+// toward each target through each route, and record what came back.
+//
+// Routes are the same reference forms upstream_proxy and chain layers accept
+// ("outbound:<id>", "pool:<id>", "chain:<id>", a bare id, or "direct"); an
+// empty route list means every built outbound. Targets must be absolute
+// http(s) URLs.
+type HTTPProbeSpec struct {
+	// Targets are the absolute http(s) URLs to request.
+	Targets []string `json:"targets"`
+	// Method is the HTTP method; empty means GET.
+	Method string `json:"method"`
+	// Headers are added to every request. Host and Content-Length are set
+	// from the URL and Body; a User-Agent is added when none is given.
+	Headers map[string]string `json:"headers"`
+	// Body is the request body, sent verbatim (empty for a bodyless method).
+	Body string `json:"body"`
+	// Routes are the route references to probe through; empty means every
+	// built outbound, one probe per (target, outbound).
+	Routes []string `json:"routes"`
+	// Timeout bounds one request. Zero uses the caller's default.
+	Timeout time.Duration `json:"timeout"`
+	// MaxBodyBytes caps how much of the response body is kept. Zero uses the
+	// caller's default.
+	MaxBodyBytes int `json:"max_body_bytes"`
+}
+
+// MaxProbeTargets bounds one HTTP probe round's target list, so a config typo
+// cannot turn a round into a request storm.
+const MaxProbeTargets = 32
+
+// ValidProbeTargets checks a probe's target list: at least one target, every
+// entry an absolute http(s) URL, duplicates dropped and surrounding space
+// trimmed. It is the one rule both callers apply — the config validator
+// rejects a bad list at PUT time, the router refuses to run one — so a target
+// that passes validation always runs.
+func ValidProbeTargets(targets []string) ([]string, error) {
+	out := make([]string, 0, len(targets))
+	seen := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		t = strings.TrimSpace(t)
+		if t == "" || seen[t] {
+			continue
+		}
+		u, err := url.Parse(t)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("probe target %q: want an absolute http(s) URL", t)
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("probe needs at least one target")
+	}
+	if len(out) > MaxProbeTargets {
+		return nil, fmt.Errorf("%d probe targets exceeds the %d limit", len(out), MaxProbeTargets)
+	}
+	return out, nil
+}
+
+// HTTPProbe is the persisted record of one HTTP probe: one (target, route)
+// pair's response, kept so a manual run and a scheduled round leave the same
+// readable history.
+type HTTPProbe struct {
+	ID     string `json:"id"`
+	Route  string `json:"route"`
+	Target string `json:"target"`
+	Method string `json:"method"`
+	// Status is the HTTP response status, or 0 when no response arrived.
+	Status int `json:"status"`
+	// Headers are the response headers, one value per name; a repeated
+	// header's values are joined with ", ".
+	Headers map[string]string `json:"headers,omitempty"`
+	// Body is the response body, capped at the probe's MaxBodyBytes.
+	Body string `json:"body"`
+	// Truncated reports that the body was capped, so a regex over it may
+	// miss a match that a full download would have found.
+	Truncated bool          `json:"truncated"`
 	Success   bool          `json:"success"`
 	Error     string        `json:"error"`
 	Latency   time.Duration `json:"latency"`

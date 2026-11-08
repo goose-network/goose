@@ -4,10 +4,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/goose-network/goose/internal/core"
+	"github.com/goose-network/goose/internal/exitip"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -73,25 +75,116 @@ func TestExitChecksMethodNotAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, code)
 }
 
-// fakeRunner records on-demand triggers.
-type fakeRunner struct{ calls int }
+// fakeRunner records on-demand triggers and returns canned results. When
+// block is non-nil the round "runs" until that channel is closed, which is
+// how the accepted-while-running path is tested without a real wait.
+type fakeRunner struct {
+	mu    sync.Mutex
+	calls int
+	specs []*exitip.RunSpec
+	res   exitip.RunResult
+	block chan struct{}
+}
 
-func (f *fakeRunner) CheckNow() { f.calls++ }
+func (f *fakeRunner) CheckNow(spec *exitip.RunSpec) <-chan exitip.RunResult {
+	f.mu.Lock()
+	f.calls++
+	f.specs = append(f.specs, spec)
+	res, block := f.res, f.block
+	f.mu.Unlock()
+	out := make(chan exitip.RunResult, 1)
+	go func() {
+		if block != nil {
+			<-block
+		}
+		out <- res
+	}()
+	return out
+}
 
-// TestExitChecksRunTriggers asserts POST /api/exit-checks/run calls the
-// runner and returns 202; without a runner it reports 503.
-func TestExitChecksRunTriggers(t *testing.T) {
-	hs, cfg, ms := newAPIServer(t, "")
+func (f *fakeRunner) lastSpec() *exitip.RunSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.specs[len(f.specs)-1]
+}
+
+// newRunServer builds a server whose exit runner is a fakeRunner.
+func newRunServer(t *testing.T, fr *fakeRunner) *httptest.Server {
+	t.Helper()
+	_, cfg, ms := newAPIServer(t, "")
 	srv := New(cfg, ms)
-	fr := &fakeRunner{}
 	srv.SetExitRunner(fr)
-	hs2 := httptest.NewServer(srv.Auth(""))
-	t.Cleanup(hs2.Close)
+	hs := httptest.NewServer(srv.Auth(""))
+	t.Cleanup(hs.Close)
+	return hs
+}
 
-	code, body := do(t, hs2, "POST", "/api/exit-checks/run", "", nil)
-	require.Equal(t, http.StatusAccepted, code, string(body))
+// TestExitChecksRunReturnsResults asserts a run that finishes inside the wait
+// window answers 200 with the round's records — a single-run task gets its
+// results in the response instead of polling history.
+func TestExitChecksRunReturnsResults(t *testing.T) {
+	fr := &fakeRunner{res: exitip.RunResult{Checks: []core.ExitCheck{{
+		ID: "c1", OutboundID: "a", Site: "ifconfig.me", ExitIP: "1.2.3.4", Success: true,
+	}}}}
+	hs := newRunServer(t, fr)
+
+	code, body := do(t, hs, "POST", "/api/exit-checks/run", "", nil)
+	require.Equal(t, http.StatusOK, code, string(body))
+	assert.Contains(t, string(body), `"status":"complete"`)
+	assert.Contains(t, string(body), `"1.2.3.4"`)
 	assert.Equal(t, 1, fr.calls)
-	_ = hs
+}
+
+// TestExitChecksRunPassesSpec asserts an optional body reaches the runner as
+// run overrides, and an absent body reaches it as nil (use the config).
+func TestExitChecksRunPassesSpec(t *testing.T) {
+	fr := &fakeRunner{}
+	hs := newRunServer(t, fr)
+
+	code, body := do(t, hs, "POST", "/api/exit-checks/run", "", nil)
+	require.Equal(t, http.StatusOK, code, string(body))
+	assert.Nil(t, fr.lastSpec(), "an empty body means no overrides")
+
+	code, body = do(t, hs, "POST", "/api/exit-checks/run", "", map[string]any{
+		"sites":           []string{"https://ifconfig.me"},
+		"outbounds":       []string{"a", "b"},
+		"timeout_seconds": 7,
+		"concurrency":     2,
+	})
+	require.Equal(t, http.StatusOK, code, string(body))
+	assert.Equal(t, &exitip.RunSpec{
+		Sites:       []string{"https://ifconfig.me"},
+		Outbounds:   []string{"a", "b"},
+		TimeoutSec:  7,
+		Concurrency: 2,
+	}, fr.lastSpec())
+}
+
+// TestExitChecksRunRejectsUnknownField asserts the body is decoded strictly,
+// so a typo in an override is a 400 rather than a silently ignored field.
+func TestExitChecksRunRejectsUnknownField(t *testing.T) {
+	hs := newRunServer(t, &fakeRunner{})
+	code, body := do(t, hs, "POST", "/api/exit-checks/run", "", map[string]any{"site": "https://ifconfig.me"})
+	require.Equal(t, http.StatusBadRequest, code, string(body))
+	assert.Contains(t, string(body), "site")
+}
+
+// TestExitChecksRunAcceptsSlowRound asserts a round still running when the
+// wait window expires answers 202 and keeps going in the background.
+func TestExitChecksRunAcceptsSlowRound(t *testing.T) {
+	restore := exitRunWait
+	exitRunWait = 50 * time.Millisecond
+	t.Cleanup(func() { exitRunWait = restore })
+
+	release := make(chan struct{})
+	fr := &fakeRunner{block: release}
+	hs := newRunServer(t, fr)
+	t.Cleanup(func() { close(release) })
+
+	code, body := do(t, hs, "POST", "/api/exit-checks/run", "", nil)
+	require.Equal(t, http.StatusAccepted, code, string(body))
+	assert.Contains(t, string(body), `"status":"accepted"`)
+	assert.Equal(t, 1, fr.calls, "the round was started even though the response did not wait for it")
 }
 
 func TestExitChecksRunWithoutRunner(t *testing.T) {

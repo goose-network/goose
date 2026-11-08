@@ -152,6 +152,45 @@ type ProbeConfig struct {
 	IntervalSec int `json:"interval_seconds"`
 	// TimeoutSec bounds each probe dial. Default 5; minimum 1.
 	TimeoutSec int `json:"timeout_seconds"`
+	// HTTP adds a scheduled application-level probe to every round: the
+	// engine issues this request toward each target through each route and
+	// records the response (status, headers, body) plus a metric row. A TCP
+	// dial only proves the server answers; an HTTP probe proves the route
+	// actually proxies. Nil (the default) keeps rounds to TCP dials.
+	HTTP *HTTPProbeConfig `json:"http,omitempty"`
+}
+
+// HTTPProbeConfig is the request a scheduled probe round issues. It mirrors
+// core.HTTPProbeSpec, which the router runs; the JSON field names are the
+// config file's.
+type HTTPProbeConfig struct {
+	// Targets are absolute http(s) URLs to request. Required: an HTTP probe
+	// config with no targets is ignored.
+	Targets []string `json:"targets"`
+	// Method is the HTTP method; empty means GET.
+	Method string `json:"method"`
+	// Headers are added to every request. A User-Agent is supplied when none
+	// is given; Host and Content-Length are the transport's to set.
+	Headers map[string]string `json:"headers"`
+	// Body is the request body, sent verbatim.
+	Body string `json:"body"`
+	// Routes are the route references to probe through — "outbound:<id>",
+	// "pool:<id>", "chain:<id>", a bare id, or "direct". Empty probes every
+	// built outbound.
+	Routes []string `json:"routes"`
+	// TimeoutSec bounds one request. Default 15; minimum 1.
+	TimeoutSec int `json:"timeout_seconds"`
+	// MaxBodyBytes caps the response body kept for assertions. Default 4096.
+	MaxBodyBytes int `json:"max_body_bytes"`
+}
+
+// EffectiveTimeoutSec returns the per-request HTTP probe timeout with the
+// default applied and the floor enforced.
+func (h *HTTPProbeConfig) EffectiveTimeoutSec() int {
+	if h == nil || h.TimeoutSec < 1 {
+		return 15
+	}
+	return h.TimeoutSec
 }
 
 // EffectiveIntervalSec returns the probe interval with the default applied

@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,7 +71,11 @@ type Manager struct {
 	rec    Recorder
 	source outboundSource
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// cfg is the last applied config, kept even while the scheduler is
+	// disabled: an on-demand run takes its sites, timeout and concurrency
+	// from here, so a single-run task needs no schedule turned on.
+	cfg     config.ExitCheckConfig
 	cancel  context.CancelFunc
 	done    chan struct{}
 	running *config.ExitCheckConfig // nil when the loop is stopped
@@ -93,6 +98,7 @@ func NewManager(rec Recorder, src outboundSource) *Manager {
 func (m *Manager) Reconfigure(cfg config.ExitCheckConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.cfg = cfg
 	if !cfg.Enabled {
 		m.stopLocked()
 		return
@@ -119,7 +125,9 @@ func (m *Manager) Reconfigure(cfg config.ExitCheckConfig) {
 
 // scheduleUnchanged is conservative: Reconfigure restarts the loop unless
 // disabled. Restarting on every engine config bump would discard the cron
-// timer's phase, so we compare the fields that shape the schedule.
+// timer's phase, so we compare the fields that shape the schedule. Sites are
+// compared by content: a changed list must take effect on the next round,
+// and length alone cannot see one URL swapped for another.
 func (m *Manager) scheduleUnchanged(next config.ExitCheckConfig) bool {
 	if m.running == nil {
 		return false
@@ -128,7 +136,7 @@ func (m *Manager) scheduleUnchanged(next config.ExitCheckConfig) bool {
 	return r.Enabled == next.Enabled &&
 		r.Cron == next.Cron &&
 		r.IntervalSec == next.IntervalSec &&
-		len(r.Sites) == len(next.Sites) &&
+		slices.Equal(r.Sites, next.Sites) &&
 		r.TimeoutSec == next.TimeoutSec &&
 		r.Concurrency == next.Concurrency
 }
@@ -150,18 +158,77 @@ func (m *Manager) Close() {
 	m.stopLocked()
 }
 
-// CheckNow starts one check round in the background, using the last applied
-// schedule's site list, timeout, and concurrency (or the defaults when never
-// configured). It does not wait; results land in the recorder as they
-// complete. On-demand triggers let the frontend request a check without
-// touching the cron schedule.
-func (m *Manager) CheckNow() {
+// RunSpec parameterises one on-demand check round. Every field is optional
+// and falls back to the last applied exit-check config, so an empty spec means
+// "run the configured round now" — and works with the scheduler disabled,
+// which is what makes a one-off check possible without a cron entry.
+type RunSpec struct {
+	// Sites are the check-site URLs to ask for this run; empty uses the
+	// config's list (or the built-in defaults when that is empty too).
+	Sites []string `json:"sites,omitempty"`
+	// Outbounds restricts the run to these outbound ids; empty checks every
+	// address-bearing outbound.
+	Outbounds []string `json:"outbounds,omitempty"`
+	// TimeoutSec bounds one site request; zero uses the config's.
+	TimeoutSec int `json:"timeout_seconds,omitempty"`
+	// Concurrency caps parallel checks; zero uses the config's.
+	Concurrency int `json:"concurrency,omitempty"`
+}
+
+// RunResult is one on-demand round's outcome: every check it made, successes
+// and failures alike. Each record is persisted before the result arrives, so
+// the rows are already in GET /api/exit-checks.
+type RunResult struct {
+	Checks []core.ExitCheck `json:"checks"`
+}
+
+// CheckNow starts one check round in the background and returns a channel
+// that receives its results when the round finishes. It does not wait, so a
+// caller that only wants to kick a round can ignore the channel (the buffered
+// send never blocks); one that wants the rows — the API's single-run path —
+// selects on it against its own deadline.
+//
+// spec overrides the last applied config field by field; nil means "the
+// configured round". Scheduling is unaffected either way.
+func (m *Manager) CheckNow(spec *RunSpec) <-chan RunResult {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.cancel == nil {
-		return // engine wiring failed or never enabled: nothing to check with
+	cfg, only := m.resolveRunLocked(spec)
+	m.mu.Unlock()
+	res := make(chan RunResult, 1)
+	go func() {
+		res <- RunResult{Checks: m.runRound(context.Background(), cfg, only)}
+	}()
+	return res
+}
+
+// resolveRunLocked merges an on-demand spec over the last applied config and
+// builds the outbound filter (nil = every address-bearing outbound).
+// Caller holds m.mu.
+func (m *Manager) resolveRunLocked(spec *RunSpec) (config.ExitCheckConfig, map[string]bool) {
+	cfg := m.cfg
+	if spec == nil {
+		return cfg, nil
 	}
-	go m.runRound(context.Background(), *m.running)
+	if len(spec.Sites) > 0 {
+		cfg.Sites = spec.Sites
+	}
+	if spec.TimeoutSec > 0 {
+		cfg.TimeoutSec = spec.TimeoutSec
+	}
+	if spec.Concurrency > 0 {
+		cfg.Concurrency = spec.Concurrency
+	}
+	var only map[string]bool
+	for _, id := range spec.Outbounds {
+		if id = strings.TrimSpace(id); id == "" {
+			continue
+		}
+		if only == nil {
+			only = make(map[string]bool, len(spec.Outbounds))
+		}
+		only[id] = true
+	}
+	return cfg, only
 }
 
 // loop schedules rounds: cron-precedence when a schedule was parsed,
@@ -170,7 +237,7 @@ func (m *Manager) loop(ctx context.Context, cfg config.ExitCheckConfig, schedule
 	defer close(m.done)
 	// The first round runs immediately: a freshly enabled checker should
 	// not wait a full interval to populate data.
-	m.runRound(ctx, cfg)
+	m.runRound(ctx, cfg, nil)
 	if schedule != nil {
 		timer := time.NewTimer(time.Until(nextMatch(schedule)))
 		defer timer.Stop()
@@ -179,7 +246,7 @@ func (m *Manager) loop(ctx context.Context, cfg config.ExitCheckConfig, schedule
 			case <-ctx.Done():
 				return
 			case <-timer.C:
-				m.runRound(ctx, cfg)
+				m.runRound(ctx, cfg, nil)
 				timer.Reset(time.Until(nextMatch(schedule)))
 			}
 		}
@@ -195,7 +262,7 @@ func (m *Manager) loop(ctx context.Context, cfg config.ExitCheckConfig, schedule
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			m.runRound(ctx, cfg)
+			m.runRound(ctx, cfg, nil)
 		}
 	}
 }
@@ -210,14 +277,16 @@ func nextMatch(s *Schedule) time.Time {
 	return t
 }
 
-// runRound checks every configured outbound once, rotating sites so
-// successive outbounds hit different check sites (spreads the load a large
-// batch generates, and would surface per-site exit differences given a
-// site list).
-func (m *Manager) runRound(ctx context.Context, cfg config.ExitCheckConfig) {
+// runRound checks each selected outbound once, rotating sites so successive
+// outbounds hit different check sites (spreads the load a large batch
+// generates, and would surface per-site exit differences given a site list).
+// only, when non-nil, restricts the round to the outbound ids it holds —
+// that is what an on-demand run over a picked subset uses. It returns every
+// check the round made, in job order.
+func (m *Manager) runRound(ctx context.Context, cfg config.ExitCheckConfig, only map[string]bool) []core.ExitCheck {
 	outs := m.source.CheckOutbounds()
 	if len(outs) == 0 {
-		return
+		return nil
 	}
 	sites := cfg.Sites
 	if len(sites) == 0 {
@@ -239,14 +308,18 @@ func (m *Manager) runRound(ctx context.Context, cfg config.ExitCheckConfig) {
 		if o.Address() == "" {
 			continue // address-less outbounds have no distinct exit IP
 		}
+		if only != nil && !only[o.ID()] {
+			continue
+		}
 		jobs = append(jobs, job{out: o, site: sites[(base+i)%len(sites)]})
 	}
 
+	results := make([]core.ExitCheck, len(jobs))
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
-	for _, j := range jobs {
+	for i, j := range jobs {
 		wg.Add(1)
-		go func(j job) {
+		go func(i int, j job) {
 			defer wg.Done()
 			select {
 			case sem <- struct{}{}:
@@ -254,14 +327,25 @@ func (m *Manager) runRound(ctx context.Context, cfg config.ExitCheckConfig) {
 				return
 			}
 			defer func() { <-sem }()
-			m.checkOne(ctx, j.out, j.site, timeout)
-		}(j)
+			results[i] = m.checkOne(ctx, j.out, j.site, timeout)
+		}(i, j)
 	}
 	wg.Wait()
+
+	// A cancelled round leaves zero-value gaps where a check never ran; drop
+	// them so a caller sees only records that exist.
+	out := make([]core.ExitCheck, 0, len(results))
+	for _, c := range results {
+		if c.ID != "" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
-// checkOne dials one outbound to one check site and records the result.
-func (m *Manager) checkOne(ctx context.Context, out core.Outbound, site string, timeout time.Duration) {
+// checkOne dials one outbound to one check site, records the result and
+// returns it.
+func (m *Manager) checkOne(ctx context.Context, out core.Outbound, site string, timeout time.Duration) core.ExitCheck {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
@@ -281,6 +365,7 @@ func (m *Manager) checkOne(ctx context.Context, out core.Outbound, site string, 
 		check.ExitIP = ip
 	}
 	_ = m.rec.RecordExitCheck(check)
+	return check
 }
 
 // fetchExitIP GETs the site's plain-text response through the outbound's

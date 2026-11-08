@@ -82,9 +82,8 @@ func siteServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// TestManagerRoundChecksAllOutbounds verifies a single round (triggered
-// through CheckNow with a running scheduler) checks every address-bearing
-// outbound and records the observed exit IP.
+// TestManagerRoundChecksAllOutbounds verifies a scheduled round checks every
+// address-bearing outbound and records the observed exit IP.
 func TestManagerRoundChecksAllOutbounds(t *testing.T) {
 	site := siteServer(t)
 
@@ -232,17 +231,101 @@ func TestManagerReconfigureStopsLoop(t *testing.T) {
 	assert.Equal(t, n, len(rec.snapshot()), "no further rounds after disable")
 }
 
-// TestManagerCheckNowWithoutConfig does nothing (engine never enabled the
-// subsystem — no sites/timeout to check with).
-func TestManagerCheckNowWithoutConfig(t *testing.T) {
+// TestManagerCheckNowSingleRun verifies an on-demand run works with the
+// scheduler never enabled — the single-run task case: no cron, no interval,
+// just "check this site through this outbound now". The results come back on
+// the returned channel and are the same records the recorder holds.
+func TestManagerCheckNowSingleRun(t *testing.T) {
+	site := siteServer(t)
 	src := &fakeSource{outs: []core.Outbound{&fakeOutbound{id: "a", addr: "127.0.0.1:1"}}}
 	rec := &fakeRecorder{}
 	m := NewManager(rec, src)
 	defer m.Close()
 
-	m.CheckNow()
+	res := <-m.CheckNow(&RunSpec{Sites: []string{site.URL}, TimeoutSec: 5})
+
+	require.Len(t, res.Checks, 1)
+	assert.Equal(t, "a", res.Checks[0].OutboundID)
+	assert.Equal(t, "127.0.0.1", res.Checks[0].ExitIP)
+	assert.True(t, res.Checks[0].Success)
+	assert.Equal(t, rec.snapshot(), res.Checks, "returned results are the persisted records")
+}
+
+// TestManagerCheckNowUsesDisabledConfig verifies a run with no overrides
+// takes the last applied config even while the scheduler is disabled, and
+// that disabling stays disabled: an operator configures sites once and runs
+// them by hand, without a cron entry.
+func TestManagerCheckNowUsesDisabledConfig(t *testing.T) {
+	site := siteServer(t)
+	src := &fakeSource{outs: []core.Outbound{&fakeOutbound{id: "a", addr: "127.0.0.1:1"}}}
+	rec := &fakeRecorder{}
+	m := NewManager(rec, src)
+	defer m.Close()
+
+	m.Reconfigure(config.ExitCheckConfig{Enabled: false, Sites: []string{site.URL}, TimeoutSec: 5})
+	res := <-m.CheckNow(nil)
+
+	require.Len(t, res.Checks, 1)
+	assert.Equal(t, hostOf(site.URL), res.Checks[0].Site)
+	assert.True(t, res.Checks[0].Success)
+
 	time.Sleep(200 * time.Millisecond)
-	assert.Empty(t, rec.snapshot())
+	assert.Len(t, rec.snapshot(), 1, "no scheduled rounds while disabled")
+}
+
+// TestManagerCheckNowOverridesSites verifies a run's site list wins over the
+// configured one, so an ad-hoc check can ask a different site without
+// rewriting the engine config.
+func TestManagerCheckNowOverridesSites(t *testing.T) {
+	configured, adhoc := siteServer(t), siteServer(t)
+	src := &fakeSource{outs: []core.Outbound{&fakeOutbound{id: "a", addr: "127.0.0.1:1"}}}
+	rec := &fakeRecorder{}
+	m := NewManager(rec, src)
+	defer m.Close()
+
+	m.Reconfigure(config.ExitCheckConfig{Enabled: false, Sites: []string{configured.URL}, TimeoutSec: 5})
+	res := <-m.CheckNow(&RunSpec{Sites: []string{adhoc.URL}})
+
+	require.Len(t, res.Checks, 1)
+	assert.Equal(t, hostOf(adhoc.URL), res.Checks[0].Site)
+}
+
+// TestManagerCheckNowOutboundSubset verifies RunSpec.Outbounds restricts the
+// round, so one outbound can be checked without dialing the others.
+func TestManagerCheckNowOutboundSubset(t *testing.T) {
+	site := siteServer(t)
+	src := &fakeSource{outs: []core.Outbound{
+		&fakeOutbound{id: "a", addr: "127.0.0.1:1"},
+		&fakeOutbound{id: "b", addr: "127.0.0.1:2"},
+		&directOutbound{id: "direct"},
+	}}
+	rec := &fakeRecorder{}
+	m := NewManager(rec, src)
+	defer m.Close()
+
+	res := <-m.CheckNow(&RunSpec{Sites: []string{site.URL}, Outbounds: []string{"b"}, TimeoutSec: 5})
+
+	require.Len(t, res.Checks, 1)
+	assert.Equal(t, "b", res.Checks[0].OutboundID)
+}
+
+// TestScheduleUnchangedComparesSiteContents verifies a swapped site list
+// restarts the loop (so the next round uses it) while an identical one keeps
+// the running loop's cron phase. Length alone cannot see a URL replaced by
+// another of the same count.
+func TestScheduleUnchangedComparesSiteContents(t *testing.T) {
+	m := NewManager(&fakeRecorder{}, &fakeSource{})
+	defer m.Close()
+	base := config.ExitCheckConfig{Enabled: true, IntervalSec: 3600, Sites: []string{"https://a"}, TimeoutSec: 5}
+	m.Reconfigure(base)
+
+	same := base
+	same.Sites = []string{"https://a"}
+	assert.True(t, m.scheduleUnchanged(same))
+
+	swapped := base
+	swapped.Sites = []string{"https://b"}
+	assert.False(t, m.scheduleUnchanged(swapped), "a changed site must restart the loop")
 }
 
 func (f *fakeRecorder) snapshot() []core.ExitCheck {

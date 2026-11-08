@@ -88,6 +88,7 @@ func New(cfg *config.Store) (*Engine, error) {
 	e.exitChecks = exitip.NewManager(ms, rtr)
 	e.exitChecks.Reconfigure(engCfg.ExitChecks)
 	e.api.SetExitRunner(e.exitChecks)
+	e.api.SetProbeRunner(rtr)
 
 	// initial reconcile of listeners
 	e.reconcile()

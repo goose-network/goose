@@ -20,6 +20,7 @@ var (
 	bucketRequests   = []byte("requests")
 	bucketOutbounds  = []byte("outbounds")
 	bucketExitChecks = []byte("exitchecks")
+	bucketProbes     = []byte("probes")
 )
 
 // Store is the metrics store: a bbolt DB for durable per-request records
@@ -70,7 +71,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("metrics: open %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketRequests, bucketOutbounds, bucketExitChecks} {
+		for _, b := range [][]byte{bucketRequests, bucketOutbounds, bucketExitChecks, bucketProbes} {
 			if _, e := tx.CreateBucketIfNotExists(b); e != nil {
 				return e
 			}
@@ -145,16 +146,25 @@ func (s *Store) Record(m core.RequestMetric) error {
 // successful request rows (a first hop that served traffic was reachable),
 // so real traffic revives an outbound a stale failed probe dropped, while a
 // handshake-level request failure never marks a server unreachable.
+//
+// HTTP probe rows (Chain[0] == core.HopProbe) are skipped entirely: they
+// measure a target THROUGH a route, so a failure may be the target's, and
+// neither the latency (target-bound, not hop-bound) nor the verdict belongs
+// to an outbound's stats.
 func (s *Store) observe(m core.RequestMetric) {
 	if len(m.Chain) == 0 {
 		return
 	}
 	id := m.Chain[0]
-	probe := id == core.HopLocal
-	if probe {
+	var probe bool
+	switch id {
+	case core.HopProbe:
+		return
+	case core.HopLocal:
 		if len(m.Chain) < 2 {
 			return
 		}
+		probe = true
 		id = m.Chain[1]
 	}
 
@@ -328,6 +338,49 @@ func (s *Store) RecentExitChecks(n int, outboundID string) ([]core.ExitCheck, er
 					continue
 				}
 				out = append(out, ec)
+				if len(out) >= n {
+					return nil
+				}
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// RecordHTTPProbe durably stores one HTTP probe result. Like exit-IP checks,
+// probes run at human cadence, so a synchronous single-key write is
+// appropriate — there is no hot data path to protect.
+func (s *Store) RecordHTTPProbe(p core.HTTPProbe) error {
+	if s.closed.Load() {
+		return errors.New("metrics: store closed")
+	}
+	val, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	key := []byte(fmt.Sprintf("%d-%s", p.StartedAt.UnixNano(), p.ID))
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketProbes).Put(key, val)
+	})
+}
+
+// RecentHTTPProbes returns up to n HTTP probe records, newest first. When
+// route is non-empty, only that route's records are returned.
+func (s *Store) RecentHTTPProbes(n int, route string) ([]core.HTTPProbe, error) {
+	if n < 1 {
+		n = 1
+	}
+	out := make([]core.HTTPProbe, 0, n)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketProbes).Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			var p core.HTTPProbe
+			if err := json.Unmarshal(v, &p); err == nil {
+				if route != "" && p.Route != route {
+					continue
+				}
+				out = append(out, p)
 				if len(out) >= n {
 					return nil
 				}

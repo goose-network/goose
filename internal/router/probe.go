@@ -23,6 +23,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sort"
 	"sync"
@@ -135,11 +136,18 @@ func (r *Router) probeLoop(ctx context.Context, ctl *probeCtl) {
 	}
 }
 
-// probeRound probes every outbound that has a dial address, recording each
+// probeRound runs one full round: the TCP dial sweep over every outbound that
+// has a server address, then the configured HTTP probes (if any).
+func (r *Router) probeRound(ctx context.Context, ctl *probeCtl) {
+	r.dialProbeRound(ctx, ctl)
+	r.httpProbeRound(ctx)
+}
+
+// dialProbeRound dials every outbound that has a dial address, recording each
 // verdict as an outbound metric row. Outbounds without an address (direct /
 // tunnel outbounds) have no server to reach and are treated as locally
 // reachable at dispatch.
-func (r *Router) probeRound(ctx context.Context, ctl *probeCtl) {
+func (r *Router) dialProbeRound(ctx context.Context, ctl *probeCtl) {
 	r.mu.RLock()
 	outs := make([]core.Outbound, 0, len(r.outbounds))
 	for _, o := range r.outbounds {
@@ -165,6 +173,30 @@ func (r *Router) probeRound(ctx context.Context, ctl *probeCtl) {
 		}(o)
 	}
 	wg.Wait()
+}
+
+// httpProbeRound runs the round's application-level probes, when the engine
+// config asks for them. It is deliberately independent of the dial sweep: a
+// route reference ("pool:x", "chain:y", "direct") can be probed even when no
+// outbound has a dial address, and an HTTP probe measures the whole path
+// rather than the first TCP handshake.
+func (r *Router) httpProbeRound(ctx context.Context) {
+	h := r.cfg.Engine().Probes.HTTP
+	if h == nil || len(h.Targets) == 0 {
+		return
+	}
+	spec := core.HTTPProbeSpec{
+		Targets:      h.Targets,
+		Method:       h.Method,
+		Headers:      h.Headers,
+		Body:         h.Body,
+		Routes:       h.Routes,
+		Timeout:      time.Duration(h.EffectiveTimeoutSec()) * time.Second,
+		MaxBodyBytes: h.MaxBodyBytes,
+	}
+	if _, err := r.RunHTTPProbes(ctx, spec); err != nil {
+		fmt.Printf("router: scheduled HTTP probe: %v\n", err)
+	}
 }
 
 // probeOne dials one outbound's server from the engine stack and records the

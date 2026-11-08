@@ -386,20 +386,54 @@
         },
         "/api/exit-checks/run": {
             "post": {
-                "description": "Starts one exit-IP check round immediately (background); results appear in GET /api/exit-checks as they complete. Uses the engine's exit-check site list, timeout, and concurrency. Scheduling (cron/interval) is unaffected.",
+                "description": "Runs one exit-IP check round immediately and returns its records, without touching the cron schedule — a single-run task needs no schedule enabled. The body is optional and overrides the engine's exit-check config per field: sites (check-site URLs), outbounds (restrict the round to these ids), timeout_seconds and concurrency. An empty body runs the configured round. Answers 200 with the records when the round finishes within 25s, else 202 while it completes in the background (results then appear in GET /api/exit-checks).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
                 "tags": [
                     "exit-checks"
                 ],
-                "summary": "Trigger an exit-IP check round now",
+                "summary": "Run an exit-IP check round now",
+                "parameters": [
+                    {
+                        "description": "Overrides for this run; omit to use the engine's exit-check config",
+                        "name": "spec",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/exitip.RunSpec"
+                        }
+                    }
+                ],
                 "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.exitRunResponse"
+                        }
+                    },
                     "202": {
                         "description": "Accepted",
+                        "schema": {
+                            "$ref": "#/definitions/api.exitRunResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
                         "schema": {
                             "$ref": "#/definitions/api.errResponse"
                         }
                     },
                     "401": {
                         "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "405": {
+                        "description": "Method Not Allowed",
                         "schema": {
                             "$ref": "#/definitions/api.errResponse"
                         }
@@ -1358,6 +1392,124 @@
                 }
             }
         },
+        "/api/probes/results": {
+            "get": {
+                "description": "Returns up to n recent HTTP probe records, newest first: for each (target, route) pair the response status, headers, body (capped, with truncated set when it was), latency, and time. Both manual runs and scheduled rounds land here. Optionally filtered to one route reference.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "probes"
+                ],
+                "summary": "List recent HTTP probe results",
+                "parameters": [
+                    {
+                        "maximum": 10000,
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Number of records to return (default 100, max 10000)",
+                        "name": "n",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Only results for this route reference (e.g. outbound:us-1, pool:default)",
+                        "name": "route",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/core.HTTPProbe"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/probes/run": {
+            "post": {
+                "description": "Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — \"outbound:\u003cid\u003e\", \"pool:\u003cid\u003e\", \"chain:\u003cid\u003e\", a bare id, or \"direct\" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with \"probe\". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "probes"
+                ],
+                "summary": "Run an HTTP reachability probe round now",
+                "parameters": [
+                    {
+                        "description": "The probe round to run",
+                        "name": "spec",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.probeRunRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/core.HTTPProbe"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/providers": {
             "get": {
                 "description": "Returns all configured dynamic outbound providers. Each provider feeds one or more managed pools (pool_ids) with the outbounds it fetches; providers created without a pool_ids list report the default pool \"default\".\nReturns the provider spec with the given id.\nCreates (or replaces) a dynamic outbound provider. The provider names a registered provider plugin (e.g. \"psiphon\", \"subscription\", \"mihomo\", \"singbox\"); pool_ids lists the managed pools its outbounds are merged into — every pool in the list receives the provider's full outbound set — and defaults to [\"default\"] when omitted (the legacy singular pool_id is still accepted as a one-entry list); config is plugin-specific. Changes apply live: the engine starts, restarts, or stops the provider's poll loop on the next config version bump.\nRemoves the provider with the given id, stops its poll loop, and drops its managed outbounds and every pool it exclusively fed.",
@@ -1739,6 +1891,69 @@
                 }
             }
         },
+        "api.exitRunResponse": {
+            "type": "object",
+            "properties": {
+                "checks": {
+                    "description": "Checks are the round's records, present only when status is complete.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/core.ExitCheck"
+                    }
+                },
+                "message": {
+                    "description": "Message explains an accepted round.",
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Status is \"complete\" when the round finished within the wait window —\nchecks then holds its records — or \"accepted\" when it is still running\nand its results will land in GET /api/exit-checks.",
+                    "type": "string",
+                    "example": "complete"
+                }
+            }
+        },
+        "api.probeRunRequest": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "description": "Body is the request body, sent verbatim.",
+                    "type": "string"
+                },
+                "headers": {
+                    "description": "Headers are added to every request. Host and Content-Length are the\ntransport's to set; a User-Agent is supplied when none is given.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "max_body_bytes": {
+                    "description": "MaxBodyBytes caps how much of each response body is kept. Default 4096;\ncapped at 1 MiB.",
+                    "type": "integer"
+                },
+                "method": {
+                    "description": "Method is the HTTP method; empty means GET.",
+                    "type": "string"
+                },
+                "routes": {
+                    "description": "Routes are the route references to probe through (\"outbound:\u003cid\u003e\",\n\"pool:\u003cid\u003e\", \"chain:\u003cid\u003e\", a bare id, or \"direct\"); empty probes every\nbuilt outbound.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "targets": {
+                    "description": "Targets are the absolute http(s) URLs to request. Required.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "timeout_seconds": {
+                    "description": "TimeoutSec bounds one request. Default 15; capped at 300.",
+                    "type": "integer"
+                }
+            }
+        },
         "config.APIConfig": {
             "type": "object",
             "properties": {
@@ -1870,6 +2085,48 @@
                 }
             }
         },
+        "config.HTTPProbeConfig": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "description": "Body is the request body, sent verbatim.",
+                    "type": "string"
+                },
+                "headers": {
+                    "description": "Headers are added to every request. A User-Agent is supplied when none\nis given; Host and Content-Length are the transport's to set.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "max_body_bytes": {
+                    "description": "MaxBodyBytes caps the response body kept for assertions. Default 4096.",
+                    "type": "integer"
+                },
+                "method": {
+                    "description": "Method is the HTTP method; empty means GET.",
+                    "type": "string"
+                },
+                "routes": {
+                    "description": "Routes are the route references to probe through — \"outbound:\u003cid\u003e\",\n\"pool:\u003cid\u003e\", \"chain:\u003cid\u003e\", a bare id, or \"direct\". Empty probes every\nbuilt outbound.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "targets": {
+                    "description": "Targets are absolute http(s) URLs to request. Required: an HTTP probe\nconfig with no targets is ignored.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "timeout_seconds": {
+                    "description": "TimeoutSec bounds one request. Default 15; minimum 1.",
+                    "type": "integer"
+                }
+            }
+        },
         "config.Inbound": {
             "type": "object",
             "properties": {
@@ -1968,6 +2225,14 @@
                 "enabled": {
                     "description": "Enabled turns scheduled probes on. Default false.",
                     "type": "boolean"
+                },
+                "http": {
+                    "description": "HTTP adds a scheduled application-level probe to every round: the\nengine issues this request toward each target through each route and\nrecords the response (status, headers, body) plus a metric row. A TCP\ndial only proves the server answers; an HTTP probe proves the route\nactually proxies. Nil (the default) keeps rounds to TCP dials.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.HTTPProbeConfig"
+                        }
+                    ]
                 },
                 "interval_seconds": {
                     "description": "IntervalSec is seconds between probe rounds. Default 300; minimum 10.",
@@ -2070,6 +2335,54 @@
                 }
             }
         },
+        "core.HTTPProbe": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "description": "Body is the response body, capped at the probe's MaxBodyBytes.",
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "headers": {
+                    "description": "Headers are the response headers, one value per name; a repeated\nheader's values are joined with \", \".",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "id": {
+                    "type": "string"
+                },
+                "latency": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "method": {
+                    "type": "string"
+                },
+                "route": {
+                    "type": "string"
+                },
+                "startedAt": {
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Status is the HTTP response status, or 0 when no response arrived.",
+                    "type": "integer"
+                },
+                "success": {
+                    "type": "boolean"
+                },
+                "target": {
+                    "type": "string"
+                },
+                "truncated": {
+                    "description": "Truncated reports that the body was capped, so a regex over it may\nmiss a match that a full download would have found.",
+                    "type": "boolean"
+                }
+            }
+        },
         "core.Network": {
             "type": "string",
             "enum": [
@@ -2121,6 +2434,33 @@
                 },
                 "user": {
                     "type": "string"
+                }
+            }
+        },
+        "exitip.RunSpec": {
+            "type": "object",
+            "properties": {
+                "concurrency": {
+                    "description": "Concurrency caps parallel checks; zero uses the config's.",
+                    "type": "integer"
+                },
+                "outbounds": {
+                    "description": "Outbounds restricts the run to these outbound ids; empty checks every\naddress-bearing outbound.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "sites": {
+                    "description": "Sites are the check-site URLs to ask for this run; empty uses the\nconfig's list (or the built-in defaults when that is empty too).",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "timeout_seconds": {
+                    "description": "TimeoutSec bounds one site request; zero uses the config's.",
+                    "type": "integer"
                 }
             }
         },
@@ -2198,18 +2538,24 @@
             "type": "integer",
             "format": "int64",
             "enum": [
+                -9223372036854775808,
+                9223372036854775807,
                 1,
                 1000,
                 1000000,
                 1000000000,
-                60000000000
+                60000000000,
+                3600000000000
             ],
             "x-enum-varnames": [
+                "minDuration",
+                "maxDuration",
                 "Nanosecond",
                 "Microsecond",
                 "Millisecond",
                 "Second",
-                "Minute"
+                "Minute",
+                "Hour"
             ]
         }
     },
@@ -2245,6 +2591,10 @@
         {
             "description": "Exit-IP check results (the public IP observed at each outbound's exit) and on-demand check triggers",
             "name": "exit-checks"
+        },
+        {
+            "description": "HTTP reachability probes: issue a real request toward targets through chosen routes and record the responses",
+            "name": "probes"
         }
     ]
 }

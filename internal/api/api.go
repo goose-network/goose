@@ -9,6 +9,8 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -16,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/goose-network/goose/internal/config"
 	"github.com/goose-network/goose/internal/core"
@@ -44,6 +47,8 @@ import (
 //	@tag.description	Recent outbound metric rows: proxied requests and reachability probes
 //	@tag.name		exit-checks
 //	@tag.description	Exit-IP check results (the public IP observed at each outbound's exit) and on-demand check triggers
+//	@tag.name		probes
+//	@tag.description	HTTP reachability probes: issue a real request toward targets through chosen routes and record the responses
 
 // maxBodyBytes caps the size of an admin-API request body to prevent memory caps the size of an admin-API request body to prevent memory
 // exhaustion from oversized POST/PUT payloads.
@@ -56,9 +61,18 @@ type providerStatusSource interface {
 }
 
 // exitRunner runs exit-IP check rounds on demand (the exitip Manager
-// implements it).
+// implements it). The returned channel delivers the round's records when it
+// finishes; the send is buffered, so a caller that stops listening never
+// blocks the round.
 type exitRunner interface {
-	CheckNow()
+	CheckNow(spec *exitip.RunSpec) <-chan exitip.RunResult
+}
+
+// probeRunner runs HTTP reachability probes on demand (the router implements
+// it). An empty route list in the spec means "every built outbound", expanded
+// by the runner.
+type probeRunner interface {
+	RunHTTPProbes(ctx context.Context, spec core.HTTPProbeSpec) ([]core.HTTPProbe, error)
 }
 
 // Server is the admin API server.
@@ -67,6 +81,7 @@ type Server struct {
 	ms     *metrics.Store
 	mux    *http.ServeMux
 	checks exitRunner
+	probes probeRunner
 	pstats providerStatusSource
 }
 
@@ -80,6 +95,10 @@ func New(cfg *config.Store, ms *metrics.Store) *Server {
 // SetExitRunner wires the on-demand exit-check trigger (the exitip Manager).
 // Optional: without it, POST /api/exit-checks/run reports 503.
 func (s *Server) SetExitRunner(r exitRunner) { s.checks = r }
+
+// SetProbeRunner wires the on-demand HTTP probe runner (the router).
+// Optional: without it, POST /api/probes/run reports 503.
+func (s *Server) SetProbeRunner(p probeRunner) { s.probes = p }
 
 // SetProviderStatusSource wires the merged provider observability view (the
 // provider Manager). Optional: without it, GET /api/providers/status reports
@@ -110,6 +129,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/engine", s.engine)
 	s.mux.HandleFunc("/api/exit-checks", s.exitChecks)
 	s.mux.HandleFunc("/api/exit-checks/run", s.exitChecksRun)
+	s.mux.HandleFunc("/api/probes/run", s.probesRun)
+	s.mux.HandleFunc("/api/probes/results", s.probeResults)
 }
 
 // Auth wraps the handler with bearer-token auth if a token is configured.
@@ -219,9 +240,10 @@ func (s *Server) engine(w http.ResponseWriter, r *http.Request) {
 //	@Router       /api/engine [put]
 
 // validateEngine sanity-checks an engine config before persisting it, so
-// invalid values (e.g. an unknown stack type, or an unparseable exit-check
-// cron expression) are rejected at the API with a 400 rather than failing
-// later during reconciliation or silently disabling the scheduler.
+// invalid values (e.g. an unknown stack type, an unparseable exit-check cron
+// expression, or a probe target that is not a URL) are rejected at the API
+// with a 400 rather than failing later during reconciliation or silently
+// disabling the scheduler.
 func validateEngine(e config.Engine) error {
 	switch e.Stack {
 	case "", "system", "gvisor":
@@ -231,6 +253,14 @@ func validateEngine(e config.Engine) error {
 	if e.ExitChecks.Cron != "" {
 		if _, err := exitip.ParseCron(e.ExitChecks.Cron); err != nil {
 			return fmt.Errorf("engine: exit_checks.cron: %w", err)
+		}
+	}
+	// A probe config with no targets is ignored rather than invalid (see
+	// config.HTTPProbeConfig), so only a non-empty list is checked — with the
+	// same rule the runner applies, so anything that validates also runs.
+	if h := e.Probes.HTTP; h != nil && len(h.Targets) > 0 {
+		if _, err := core.ValidProbeTargets(h.Targets); err != nil {
+			return fmt.Errorf("engine: probes.http.targets: %w", err)
 		}
 	}
 	return nil
@@ -698,13 +728,38 @@ func (s *Server) exitChecks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, rec, http.StatusOK)
 }
 
+// exitRunWait bounds how long POST /api/exit-checks/run waits for a round to
+// finish before answering 202 with the round still running. A single-run task
+// wants its results in the response, but a round over hundreds of outbounds
+// must not hold an HTTP request open for minutes. A var so tests can shorten
+// it instead of waiting out the real budget.
+var exitRunWait = 25 * time.Second
+
+// exitRunResponse is the body of POST /api/exit-checks/run.
+type exitRunResponse struct {
+	// Status is "complete" when the round finished within the wait window —
+	// checks then holds its records — or "accepted" when it is still running
+	// and its results will land in GET /api/exit-checks.
+	Status string `json:"status" example:"complete"`
+	// Checks are the round's records, present only when status is complete.
+	Checks []core.ExitCheck `json:"checks,omitempty"`
+	// Message explains an accepted round.
+	Message string `json:"message,omitempty"`
+}
+
 // runExitChecks godoc
 //
-//	@Summary      Trigger an exit-IP check round now
-//	@Description  Starts one exit-IP check round immediately (background); results appear in GET /api/exit-checks as they complete. Uses the engine's exit-check site list, timeout, and concurrency. Scheduling (cron/interval) is unaffected.
+//	@Summary      Run an exit-IP check round now
+//	@Description  Runs one exit-IP check round immediately and returns its records, without touching the cron schedule — a single-run task needs no schedule enabled. The body is optional and overrides the engine's exit-check config per field: sites (check-site URLs), outbounds (restrict the round to these ids), timeout_seconds and concurrency. An empty body runs the configured round. Answers 200 with the records when the round finishes within 25s, else 202 while it completes in the background (results then appear in GET /api/exit-checks).
 //	@Tags         exit-checks
-//	@Success      202 {object} errResponse
+//	@Accept       json
+//	@Produce      json
+//	@Param        spec body exitip.RunSpec false "Overrides for this run; omit to use the engine's exit-check config"
+//	@Success      200 {object} exitRunResponse
+//	@Success      202 {object} exitRunResponse
+//	@Failure      400 {object} errResponse
 //	@Failure      401 {object} errResponse
+//	@Failure      405 {object} errResponse
 //	@Failure      503 {object} errResponse
 //	@Router       /api/exit-checks/run [post]
 func (s *Server) exitChecksRun(w http.ResponseWriter, r *http.Request) {
@@ -716,8 +771,171 @@ func (s *Server) exitChecksRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, errResponse{"exit checks not wired"}, http.StatusServiceUnavailable)
 		return
 	}
-	s.checks.CheckNow()
-	writeJSON(w, errResponse{"exit-IP check round started"}, http.StatusAccepted)
+	spec, err := readOptionalSpec[exitip.RunSpec](r)
+	if err != nil {
+		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
+		return
+	}
+	results := s.checks.CheckNow(spec)
+	wait := time.NewTimer(exitRunWait)
+	defer wait.Stop()
+	select {
+	case res := <-results:
+		writeJSON(w, exitRunResponse{Status: "complete", Checks: res.Checks}, http.StatusOK)
+	case <-wait.C:
+		writeJSON(w, exitRunResponse{
+			Status:  "accepted",
+			Message: "exit-IP check round still running; results appear in GET /api/exit-checks",
+		}, http.StatusAccepted)
+	case <-r.Context().Done():
+		// The client hung up. The round is detached (its context is not the
+		// request's), so it finishes and its records land in the history.
+	}
+}
+
+// readOptionalSpec decodes a request body that may be absent. It returns
+// (nil, nil) for an empty body — readJSON rejects one, but the trigger
+// endpoints take their parameters from the engine config unless the caller
+// overrides them, so "no body" is a valid request rather than a 400.
+func readOptionalSpec[T any](r *http.Request) (*T, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxBodyBytes))
+	if err != nil {
+		return nil, errors.New("could not read request body")
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+	var v T
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&v); err != nil {
+		return nil, fmt.Errorf("invalid request body: %w", err)
+	}
+	return &v, nil
+}
+
+// --- probes ---
+
+// probeRunRequest is the body of POST /api/probes/run: one HTTP reachability
+// probe round. It mirrors core.HTTPProbeSpec with JSON field names, so a
+// caller describes the request once and the engine runs it as given.
+type probeRunRequest struct {
+	// Targets are the absolute http(s) URLs to request. Required.
+	Targets []string `json:"targets"`
+	// Method is the HTTP method; empty means GET.
+	Method string `json:"method,omitempty"`
+	// Headers are added to every request. Host and Content-Length are the
+	// transport's to set; a User-Agent is supplied when none is given.
+	Headers map[string]string `json:"headers,omitempty"`
+	// Body is the request body, sent verbatim.
+	Body string `json:"body,omitempty"`
+	// Routes are the route references to probe through ("outbound:<id>",
+	// "pool:<id>", "chain:<id>", a bare id, or "direct"); empty probes every
+	// built outbound.
+	Routes []string `json:"routes,omitempty"`
+	// TimeoutSec bounds one request. Default 15; capped at 300.
+	TimeoutSec int `json:"timeout_seconds,omitempty"`
+	// MaxBodyBytes caps how much of each response body is kept. Default 4096;
+	// capped at 1 MiB.
+	MaxBodyBytes int `json:"max_body_bytes,omitempty"`
+}
+
+// probeRunBudget bounds one synchronous probe round: the fan-out is up to 512
+// requests at a concurrency of 8, so it needs a ceiling. A request still in
+// flight when the budget expires is recorded with the context error like any
+// other failure, and the response reports what completed.
+const probeRunBudget = 2 * time.Minute
+
+// runProbes godoc
+//
+//	@Summary      Run an HTTP reachability probe round now
+//	@Description  Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — "outbound:<id>", "pool:<id>", "chain:<id>", a bare id, or "direct" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with "probe". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine.
+//	@Tags         probes
+//	@Accept       json
+//	@Produce      json
+//	@Param        spec body probeRunRequest true "The probe round to run"
+//	@Success      200 {array} core.HTTPProbe
+//	@Failure      400 {object} errResponse
+//	@Failure      401 {object} errResponse
+//	@Failure      405 {object} errResponse
+//	@Failure      503 {object} errResponse
+//	@Router       /api/probes/run [post]
+func (s *Server) probesRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
+		return
+	}
+	if s.probes == nil {
+		writeJSON(w, errResponse{"probes not wired"}, http.StatusServiceUnavailable)
+		return
+	}
+	req, err := readOptionalSpec[probeRunRequest](r)
+	if err != nil {
+		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
+		return
+	}
+	if req == nil || len(req.Targets) == 0 {
+		writeJSON(w, errResponse{"probes: targets is required"}, http.StatusBadRequest)
+		return
+	}
+	spec := core.HTTPProbeSpec{
+		Targets:      req.Targets,
+		Method:       req.Method,
+		Headers:      req.Headers,
+		Body:         req.Body,
+		Routes:       req.Routes,
+		Timeout:      time.Duration(req.TimeoutSec) * time.Second,
+		MaxBodyBytes: req.MaxBodyBytes,
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), probeRunBudget)
+	defer cancel()
+	// An error here is always a spec the round cannot run at all (a non-URL
+	// target, a fan-out beyond the limit, no routes to probe), so it is the
+	// caller's mistake: 400.
+	out, err := s.probes.RunHTTPProbes(ctx, spec)
+	if err != nil {
+		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
+		return
+	}
+	if out == nil {
+		out = []core.HTTPProbe{}
+	}
+	writeJSON(w, out, http.StatusOK)
+}
+
+// listProbeResults godoc
+//
+//	@Summary      List recent HTTP probe results
+//	@Description  Returns up to n recent HTTP probe records, newest first: for each (target, route) pair the response status, headers, body (capped, with truncated set when it was), latency, and time. Both manual runs and scheduled rounds land here. Optionally filtered to one route reference.
+//	@Tags         probes
+//	@Produce      json
+//	@Param        n query int false "Number of records to return (default 100, max 10000)" default(100) maximum(10000)
+//	@Param        route query string false "Only results for this route reference (e.g. outbound:us-1, pool:default)"
+//	@Success      200 {array} core.HTTPProbe
+//	@Failure      401 {object} errResponse
+//	@Failure      405 {object} errResponse
+//	@Failure      500 {object} errResponse
+//	@Router       /api/probes/results [get]
+func (s *Server) probeResults(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
+		return
+	}
+	n := 100
+	if v := r.URL.Query().Get("n"); v != "" {
+		if parsed, err := parseInt(v); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	if n > maxMetricsRows {
+		n = maxMetricsRows
+	}
+	rec, err := s.ms.RecentHTTPProbes(n, r.URL.Query().Get("route"))
+	if err != nil {
+		writeJSON(w, errResponse{err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, rec, http.StatusOK)
 }
 
 func parseInt(s string) (int, error) {
