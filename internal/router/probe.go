@@ -85,6 +85,9 @@ func (r *Router) stopProber() {
 		ctl.cancel()
 		<-ctl.done
 	}
+	// A detached HTTP round observes the cancel above; join it so Close does
+	// not return while a round is still recording rows.
+	r.httpProbeWG.Wait()
 }
 
 // reconcileProberLocked starts or stops the probe loop to match the engine's
@@ -137,10 +140,26 @@ func (r *Router) probeLoop(ctx context.Context, ctl *probeCtl) {
 }
 
 // probeRound runs one full round: the TCP dial sweep over every outbound that
-// has a server address, then the configured HTTP probes (if any).
+// has a server address, then the configured HTTP probes (if any). The HTTP
+// round runs detached: with many targets or slow routes it can outlive the
+// interval, and the dial sweep's verdicts are what routing filters on, so a
+// long HTTP round must not push the next sweep out. Single-flight: a round
+// still in flight skips its slot instead of queueing a second one behind it.
 func (r *Router) probeRound(ctx context.Context, ctl *probeCtl) {
 	r.dialProbeRound(ctx, ctl)
-	r.httpProbeRound(ctx)
+	h := r.cfg.Engine().Probes.HTTP
+	if h == nil || len(h.Targets) == 0 {
+		return
+	}
+	if !r.httpProbeInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	r.httpProbeWG.Add(1)
+	go func() {
+		defer r.httpProbeWG.Done()
+		defer r.httpProbeInFlight.Store(false)
+		r.httpProbeRound(ctx)
+	}()
 }
 
 // dialProbeRound dials every outbound that has a dial address, recording each

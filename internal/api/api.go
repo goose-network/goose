@@ -840,11 +840,10 @@ type probeRunRequest struct {
 	MaxBodyBytes int `json:"max_body_bytes,omitempty"`
 }
 
-// probeRunBudget bounds one synchronous probe round: the fan-out is up to 512
-// requests at a concurrency of 8, so it needs a ceiling. A request still in
-// flight when the budget expires is recorded with the context error like any
-// other failure, and the response reports what completed.
-const probeRunBudget = 2 * time.Minute
+// The synchronous round needs no budget of its own: RunHTTPProbes bounds the
+// round by its worst case (waves × per-request timeout, capped), so a spec's
+// timeout_seconds applies to a manual run exactly as it does to a scheduled
+// one, and a client that hangs up cancels the rest through r.Context().
 
 // runProbes godoc
 //
@@ -887,12 +886,10 @@ func (s *Server) probesRun(w http.ResponseWriter, r *http.Request) {
 		Timeout:      time.Duration(req.TimeoutSec) * time.Second,
 		MaxBodyBytes: req.MaxBodyBytes,
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), probeRunBudget)
-	defer cancel()
 	// An error here is always a spec the round cannot run at all (a non-URL
 	// target, a fan-out beyond the limit, no routes to probe), so it is the
 	// caller's mistake: 400.
-	out, err := s.probes.RunHTTPProbes(ctx, spec)
+	out, err := s.probes.RunHTTPProbes(r.Context(), spec)
 	if err != nil {
 		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 		return

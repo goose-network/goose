@@ -363,7 +363,20 @@ func TestManagerCronScheduling(t *testing.T) {
 	assert.GreaterOrEqual(t, len(rec.snapshot()), 2, "cron schedule should fire a second round")
 
 	if len(rec.snapshot()) >= 2 {
-		gap := rec.snapshot()[1].StartedAt.Sub(rec.snapshot()[0].StartedAt)
-		assert.Greater(t, gap, 5*time.Second, "second round should come from cron, not a tight loop")
+		first := rec.snapshot()[0].StartedAt
+		second := rec.snapshot()[1].StartedAt
+		// The loop arms the schedule only after the first round completes, so
+		// the second round lands on the first cron fire at or after that
+		// moment — one of the two fires bracketing the first round's own
+		// minute. A fixed minimum gap instead fails whenever the immediate
+		// first round starts close to a minute boundary, which is exactly
+		// when the cron fire follows it within seconds.
+		fire, err := s.Next(first)
+		require.NoError(t, err)
+		at := func(f time.Time) bool {
+			return !second.Before(f.Add(-2*time.Second)) && second.Before(f.Add(10*time.Second))
+		}
+		assert.True(t, at(fire) || at(fire.Add(time.Minute)),
+			"second round should come from the cron fire after the first, got gap %s", second.Sub(first))
 	}
 }

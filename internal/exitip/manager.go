@@ -371,7 +371,12 @@ func (m *Manager) checkOne(ctx context.Context, out core.Outbound, site string, 
 // fetchExitIP GETs the site's plain-text response through the outbound's
 // tunnel and trims it to the echoed IP.
 func (m *Manager) fetchExitIP(ctx context.Context, out core.Outbound, site string) (string, error) {
-	if _, err := url.Parse(site); err != nil || !strings.HasPrefix(site, "http") {
+	u, err := url.Parse(site)
+	// Compare the parsed scheme, not a prefix: schemes are case-insensitive
+	// (RFC 3986) and url.Parse lowercases them, where a case-sensitive
+	// HasPrefix(site, "http") let "HTTPS://ifconfig.me" through config
+	// validation and then fail every check against it.
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", fmt.Errorf("bad site URL %q", site)
 	}
 	// Dial the site's host:80/443 through the outbound's dial path — the

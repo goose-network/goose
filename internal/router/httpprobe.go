@@ -24,6 +24,7 @@
 package router
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -58,6 +59,14 @@ const (
 	// maxProbeRoutes bounds the spec's route list, so the fan-out check has
 	// something small to reject first.
 	maxProbeRoutes = 128
+	// probeRoundSlack is added to a round's worst-case budget for dial and
+	// scheduling overhead beyond the per-request timeouts.
+	probeRoundSlack = 30 * time.Second
+	// maxProbeRunBudget caps the derived round budget: at the allowed maxima
+	// (512 jobs, 5-minute timeout) the worst case is hours, which no caller
+	// should wait for. A round the cap cuts short still returns and records
+	// what completed; jobs it cancels before issue are reported, not recorded.
+	maxProbeRunBudget = 10 * time.Minute
 )
 
 // RunHTTPProbes issues spec's request toward every target through every route
@@ -113,6 +122,19 @@ func (r *Router) RunHTTPProbes(ctx context.Context, spec core.HTTPProbeSpec) ([]
 		}
 	}
 
+	// Bound the round by its own worst case — every concurrency wave spending
+	// the full per-request timeout — plus slack. Without a budget a round of
+	// black-holing routes holds its caller (the synchronous API handler, or a
+	// scheduled slot) for as long as the timeouts multiply out; with one, a
+	// cut-short round still returns and records what completed.
+	waves := (len(jobs) + probeHTTPConcurrency - 1) / probeHTTPConcurrency
+	budget := time.Duration(waves)*timeout + probeRoundSlack
+	if budget > maxProbeRunBudget {
+		budget = maxProbeRunBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
 	results := make([]core.HTTPProbe, len(jobs))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, probeHTTPConcurrency)
@@ -123,7 +145,13 @@ func (r *Router) RunHTTPProbes(ctx context.Context, spec core.HTTPProbeSpec) ([]
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
-				results[i] = r.probeResult(spec, j.target, j.route, time.Now(), 0, nil, "", false, ctx.Err())
+				// The round ended before this request was issued. The
+				// caller's response still accounts for the job, but a
+				// request that never left must not stand in history as a
+				// failed probe: it would displace real rows and read as a
+				// dead route.
+				results[i] = assembleProbe(spec, j.target, j.route, time.Now(), 0, nil, "", false,
+					fmt.Errorf("round ended before the request was issued: %w", ctx.Err()))
 				return
 			}
 			defer func() { <-sem }()
@@ -181,8 +209,23 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 	}
 	defer resp.Body.Close()
 
+	// A caller-set Accept-Encoding switches the transport's transparent
+	// decode off, which leaves Content-Encoding on the response; decode here
+	// so assertions and the body pane see the body the target actually sent
+	// rather than the compressed bytes. When the transport decoded it, the
+	// header is already gone and this branch does not fire.
+	reader := io.Reader(resp.Body)
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		gz, gerr := gzip.NewReader(resp.Body)
+		if gerr != nil {
+			return r.probeResult(spec, target, route, start, resp.StatusCode, resp.Header, "", false, gerr)
+		}
+		defer gz.Close()
+		reader = gz
+	}
+
 	// Read one byte past the limit so truncation is a fact, not a guess.
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, int64(bodyLimit)+1))
+	raw, readErr := io.ReadAll(io.LimitReader(reader, int64(bodyLimit)+1))
 	body := string(raw)
 	truncated := len(raw) > bodyLimit
 	if truncated {
@@ -213,7 +256,9 @@ func (r *Router) probeTransport(route string) *http.Transport {
 
 // newProbeRequest builds the request: spec's method (GET by default), headers
 // and body, with a User-Agent so targets that reject an empty one still
-// answer. Host and Content-Length are the transport's to set.
+// answer. A spec Host becomes req.Host — net/http writes the Host line from
+// there and would silently drop it from the header map — and Content-Length
+// is left to the transport.
 func newProbeRequest(ctx context.Context, spec core.HTTPProbeSpec, target string) (*http.Request, error) {
 	method := strings.ToUpper(strings.TrimSpace(spec.Method))
 	if method == "" {
@@ -231,6 +276,10 @@ func newProbeRequest(ctx context.Context, spec core.HTTPProbeSpec, target string
 		if name == "" {
 			continue
 		}
+		if strings.EqualFold(name, "Host") {
+			req.Host = value
+			continue
+		}
 		req.Header.Set(name, value)
 	}
 	if req.Header.Get("User-Agent") == "" {
@@ -244,6 +293,14 @@ func newProbeRequest(ctx context.Context, spec core.HTTPProbeSpec, target string
 // failed assertion is still a reachable route — the caller's expectations
 // decide whether the response was the right one.
 func (r *Router) probeResult(spec core.HTTPProbeSpec, target, route string, start time.Time, status int, header http.Header, body string, truncated bool, err error) core.HTTPProbe {
+	p := assembleProbe(spec, target, route, start, status, header, body, truncated, err)
+	r.recordProbe(p, target, err, start)
+	return p
+}
+
+// assembleProbe builds one result row without recording it, for jobs whose
+// request never left (a round cancelled while they waited for a slot).
+func assembleProbe(spec core.HTTPProbeSpec, target, route string, start time.Time, status int, header http.Header, body string, truncated bool, err error) core.HTTPProbe {
 	latency := time.Since(start)
 	method := strings.ToUpper(strings.TrimSpace(spec.Method))
 	if method == "" {
@@ -265,11 +322,14 @@ func (r *Router) probeResult(spec core.HTTPProbeSpec, target, route string, star
 	if err != nil {
 		p.Error = err.Error()
 	}
-	_ = r.metrics.RecordHTTPProbe(p)
+	return p
+}
 
-	// The metric row carries the target's host:port like every other row, so
-	// the metrics table reads consistently; the full URL lives on the probe
-	// record.
+// recordProbe writes the probe row and the metric row for one result. The
+// metric row carries the target's host:port like every other row, so the
+// metrics table reads consistently; the full URL lives on the probe record.
+func (r *Router) recordProbe(p core.HTTPProbe, target string, err error, start time.Time) {
+	_ = r.metrics.RecordHTTPProbe(p)
 	meta := core.Metadata{Network: core.NetworkTCP, StartedAt: start}
 	if u, uerr := url.Parse(target); uerr == nil && u.Host != "" {
 		meta.TargetHost = u.Hostname()
@@ -282,8 +342,7 @@ func (r *Router) probeResult(spec core.HTTPProbeSpec, target, route string, star
 			}
 		}
 	}
-	r.record(meta, []string{core.HopProbe, route}, err == nil, err, latency)
-	return p
+	r.record(meta, []string{core.HopProbe, p.Route}, err == nil, err, p.Latency)
 }
 
 // flattenHeaders joins a repeated response header's values with ", " so one

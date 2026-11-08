@@ -7,6 +7,7 @@
 package router
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -343,4 +344,70 @@ func TestScheduledHTTPProbeIgnoredWithoutTargets(t *testing.T) {
 	rows, err := f.ms.RecentHTTPProbes(20, "")
 	require.NoError(t, err)
 	assert.Empty(t, rows, "no HTTP probe records without targets")
+}
+
+// TestHTTPProbeHonorsSpecHost verifies a spec Host reaches the wire: probing
+// an origin by address with a vhost Host is a normal operator move, and
+// net/http silently drops a Host left in the header map.
+func TestHTTPProbeHonorsSpecHost(t *testing.T) {
+	r, _ := newProbeOnlyRouter(t)
+	got := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		got <- req.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	res, err := r.RunHTTPProbes(context.Background(), core.HTTPProbeSpec{
+		Targets: []string{srv.URL + "/ip"},
+		Routes:  []string{"direct"},
+		Headers: map[string]string{"Host": "vhost.example.com"},
+	})
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	require.True(t, res[0].Success, "probe should get a response: %s", res[0].Error)
+	assert.Equal(t, "vhost.example.com", <-got)
+}
+
+// TestHTTPProbeDecodesCallerAcceptEncoding verifies a caller-set
+// Accept-Encoding — which switches the transport's transparent decode off —
+// still yields the plaintext body for assertions and the history pane.
+func TestHTTPProbeDecodesCallerAcceptEncoding(t *testing.T) {
+	r, _ := newProbeOnlyRouter(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") {
+			fmt.Fprint(w, "PLAINTEXT-MARKER")
+			return
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		fmt.Fprint(gz, "PLAINTEXT-MARKER")
+		_ = gz.Close()
+	}))
+	t.Cleanup(srv.Close)
+
+	res, err := r.RunHTTPProbes(context.Background(), core.HTTPProbeSpec{
+		Targets: []string{srv.URL + "/ip"},
+		Routes:  []string{"direct"},
+		Headers: map[string]string{"Accept-Encoding": "gzip"},
+	})
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	require.True(t, res[0].Success, "probe should get a response: %s", res[0].Error)
+	assert.Contains(t, res[0].Body, "PLAINTEXT-MARKER", "a forced Accept-Encoding must not record compressed bytes")
+}
+
+// TestHTTPProbeUnissuedJobLeavesNoRow pins the assemble/record split: a job
+// the round's end cancelled before it was issued is reported to the caller
+// but never stands in history as a failed probe.
+func TestHTTPProbeUnissuedJobLeavesNoRow(t *testing.T) {
+	_, ms := newProbeOnlyRouter(t)
+	p := assembleProbe(core.HTTPProbeSpec{Method: "GET"}, "http://example.com/ip", "direct",
+		time.Now(), 0, nil, "", false, context.Canceled)
+	assert.False(t, p.Success)
+	assert.Contains(t, p.Error, "context canceled")
+
+	rows, err := ms.RecentHTTPProbes(10, "")
+	require.NoError(t, err)
+	assert.Empty(t, rows, "a request that never left must not be recorded")
 }

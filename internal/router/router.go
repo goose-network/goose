@@ -57,6 +57,12 @@ type Router struct {
 	probeCtl   *probeCtl
 	probeCtlMu sync.Mutex
 
+	// httpProbeInFlight single-flights the scheduled HTTP round, which runs
+	// detached from the probe loop so a slow round cannot delay the dial
+	// sweep; httpProbeWG joins detached rounds on shutdown.
+	httpProbeInFlight atomic.Bool
+	httpProbeWG       sync.WaitGroup
+
 	copyBufPool sync.Pool
 	metricSeq   uint64
 }
