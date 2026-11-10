@@ -101,3 +101,23 @@ func TestStoreEngineDefaultsAPIListenEnv(t *testing.T) {
 	t.Setenv("GOOSE_API_LISTEN", "0.0.0.0:9090")
 	assert.Equal(t, "0.0.0.0:9090", NewStore().Engine().API.Listen)
 }
+
+// TestExitCheckSitesNilVersusEmptyRoundTrip pins the sentinel that makes the
+// built-in check sites deletable: a nil Sites list means "never set" (the
+// engine falls back to its built-in defaults) while an explicit empty list
+// means "every site was deleted". The config file must preserve that
+// difference across restarts, so Sites has no omitempty tag and must
+// round-trip through JSON null versus [].
+func TestExitCheckSitesNilVersusEmptyRoundTrip(t *testing.T) {
+	roundTrip := func(sites []string) []string {
+		data, err := json.Marshal(Engine{ExitChecks: ExitCheckConfig{Sites: sites}})
+		require.NoError(t, err)
+		var back Engine
+		require.NoError(t, json.Unmarshal(data, &back))
+		return back.ExitChecks.Sites
+	}
+	assert.Nil(t, roundTrip(nil), "an unset list must survive as null so the defaults apply")
+	emptied := roundTrip([]string{})
+	require.NotNil(t, emptied, "a deleted list must survive as [], not collapse to null")
+	assert.Empty(t, emptied)
+}

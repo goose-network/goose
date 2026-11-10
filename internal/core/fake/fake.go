@@ -16,23 +16,23 @@ import (
 // real loopback listener to simulate an upstream. It does NOT implement the
 // router's ChainDialer interface; use ChainFakeOutbound for chaining tests.
 type FakeOutbound struct {
-	IDVal    string
-	Proto    string
-	AddrVal  string
-	Loc      *core.Location
-	StatsVal core.OutboundStats
+	IDVal     string
+	Proto     string
+	AddrVal   string
+	Loc       *core.Location
+	StatsVal  core.OutboundStats
 	DialCount int
-	mu       sync.Mutex
+	mu        sync.Mutex
 	// OnDial, if set, is returned as the dialed connection. If nil, a
 	// net.Pipe pair is returned (one end to the caller, one discarded).
-	OnDial   func(network core.Network, target string) (net.Conn, error)
-	DialErr  error
+	OnDial  func(network core.Network, target string) (net.Conn, error)
+	DialErr error
 }
 
-func (f *FakeOutbound) ID() string           { return f.IDVal }
-func (f *FakeOutbound) Protocol() string     { return f.Proto }
-func (f *FakeOutbound) Address() string      { return f.AddrVal }
-func (f *FakeOutbound) Location() *core.Location { return f.Loc }
+func (f *FakeOutbound) ID() string                { return f.IDVal }
+func (f *FakeOutbound) Protocol() string          { return f.Proto }
+func (f *FakeOutbound) Address() string           { return f.AddrVal }
+func (f *FakeOutbound) Location() *core.Location  { return f.Loc }
 func (f *FakeOutbound) Stats() core.OutboundStats { return f.StatsVal }
 
 func (f *FakeOutbound) DialContext(ctx context.Context, network core.Network, target string) (net.Conn, error) {

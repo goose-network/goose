@@ -135,7 +135,11 @@ Every field of the psiphon `config` is optional; with no `config_path` the
 provider embeds the production Psiphon network parameters (channel, sponsor,
 remote-server-list URLs and signing keys, extracted from the official
 client) and fetches the server list itself — see
-[the plugin README](../goose-plugin-psiphon/README.md).
+[the plugin README](../goose-plugin-psiphon/README.md). The provider
+contributes one outbound per server in that list; its general tunnel (where
+tunnel-core picks the exit server per connection, so no single address
+describes the exit) keeps running underneath but is deliberately not emitted
+as an outbound of its own.
 
 ### Routed provider fetches (`upstream_proxy`)
 
@@ -212,6 +216,20 @@ first-hop selection until a later round — or a successful request — measures
 it reachable again. Fail-open: before anything is measured, every candidate
 stays admissible.
 
+On top of the background prober, the web UI's Probes page runs HTTP probes
+on demand (`POST /api/probes/run`, history via `GET /api/probes/results`):
+each probe fetches a target URL through a route — direct, an outbound, a
+pool, or a chain — and reports where the time went and, on failure, *which
+leg* broke. Every result carries per-phase timings (route dial, DNS,
+connect, TLS, first byte), the first-hop address dialed, and the outbound
+that served it; failures classify into a phase (`request`, `dns`,
+`connect`, `proxy`, `tls`, `headers`, `body`) and a reason slug
+(`dns_timeout`, `connect_refused`, `proxy_timeout`, `body_timeout`, ...),
+so a dead route says whether the local network failed to reach the proxy or
+the proxy failed to reach the target. The probe's metrics row carries the
+same reason. These runs are informational — they never feed the
+reachability verdicts above.
+
 Reaching a blocked server is explicit config, the same way the diagram
 shows chains: put the relay in front of it as a chain layer (or as the
 server's own `upstream_proxy`), and each hop's success is measured per hop:
@@ -255,7 +273,10 @@ per outbound, on a schedule, and record the history:
 Each round dials every outbound *through the outbound itself* and asks one
 of the configured "what is my IP" sites, rotating
 round-robin across the list so large batches spread load instead of
-tripping one site's rate limits. Results are recorded per
+tripping one site's rate limits. `sites` is optional: null or absent
+selects the built-in defaults, and an explicit empty list means every site
+was deleted — the web UI's Exit IP page lets you delete the built-ins, and
+with no sites left the rounds check nothing. Results are recorded per
 (outbound, site, exit IP, time) and served by `GET /api/exit-checks`
 (filter with `?outbound_id=`); `POST /api/exit-checks/run` triggers an
 extra round on demand. `interval_seconds` is the alternative to `cron`

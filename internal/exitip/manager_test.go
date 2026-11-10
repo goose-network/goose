@@ -328,6 +328,62 @@ func TestScheduleUnchangedComparesSiteContents(t *testing.T) {
 	assert.False(t, m.scheduleUnchanged(swapped), "a changed site must restart the loop")
 }
 
+// TestScheduleUnchangedSeesSiteNilness verifies the nil↔empty flip — the
+// transition between "built-in defaults" and "every site deleted" — restarts
+// the loop. slices.Equal treats nil and empty as equal, so content comparison
+// alone cannot see the one change that decides whether a round runs at all.
+func TestScheduleUnchangedSeesSiteNilness(t *testing.T) {
+	m := NewManager(&fakeRecorder{}, &fakeSource{}) // no outbounds: rounds no-op
+	defer m.Close()
+	base := config.ExitCheckConfig{Enabled: true, IntervalSec: 3600, TimeoutSec: 5}
+	m.Reconfigure(base) // Sites nil: the defaults round
+
+	assert.True(t, m.scheduleUnchanged(base), "nil stays nil: no restart")
+
+	deleted := base
+	deleted.Sites = []string{}
+	assert.False(t, m.scheduleUnchanged(deleted), "deleting every site must restart the loop")
+
+	m.Reconfigure(deleted)
+	assert.True(t, m.scheduleUnchanged(deleted), "empty stays empty: no restart")
+	assert.False(t, m.scheduleUnchanged(base), "restoring the defaults must restart the loop")
+}
+
+// TestManagerDeletedSitesCheckNothing verifies an explicit empty site list —
+// every built-in default deleted — runs no checks rather than falling back to
+// the defaults, which would make them undeletable.
+func TestManagerDeletedSitesCheckNothing(t *testing.T) {
+	src := &fakeSource{outs: []core.Outbound{&fakeOutbound{id: "a", addr: "127.0.0.1:1"}}}
+	rec := &fakeRecorder{}
+	m := NewManager(rec, src)
+	defer m.Close()
+
+	m.Reconfigure(config.ExitCheckConfig{Enabled: true, IntervalSec: 3600, Sites: []string{}, TimeoutSec: 5})
+	res := <-m.CheckNow(nil)
+	assert.Empty(t, res.Checks, "an explicitly emptied site list checks nothing")
+	assert.Empty(t, rec.snapshot(), "the scheduled round must not recreate the defaults")
+}
+
+// TestManagerNilSitesUseDefaults verifies a config that never set a site
+// list (nil, as opposed to an emptied one) still checks the built-in
+// defaults.
+func TestManagerNilSitesUseDefaults(t *testing.T) {
+	site := siteServer(t)
+	old := defaultSites
+	defaultSites = []string{site.URL}
+	t.Cleanup(func() { defaultSites = old })
+
+	src := &fakeSource{outs: []core.Outbound{&fakeOutbound{id: "a", addr: "127.0.0.1:1"}}}
+	rec := &fakeRecorder{}
+	m := NewManager(rec, src)
+	defer m.Close()
+
+	m.Reconfigure(config.ExitCheckConfig{Enabled: true, IntervalSec: 3600, TimeoutSec: 5})
+	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 1 }, 5*time.Second, 20*time.Millisecond,
+		"a nil site list must fall back to the defaults")
+	assert.Equal(t, hostOf(site.URL), rec.snapshot()[0].Site)
+}
+
 func (f *fakeRecorder) snapshot() []core.ExitCheck {
 	f.mu.Lock()
 	defer f.mu.Unlock()

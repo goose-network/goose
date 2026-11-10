@@ -651,7 +651,7 @@ func (s *Server) chains(w http.ResponseWriter, r *http.Request) {
 // listMetrics godoc
 //
 //	@Summary      List recent outbound metrics
-//	@Description  Returns up to n recent outbound metric rows, newest first, each carrying the path that produced it: a proxied request's chain, or a reachability probe row whose chain starts with "local" (the engine's own network dialing an outbound's server). n defaults to 100; values above 10000 are capped; invalid values fall back to the default.
+//	@Description  Returns up to n recent outbound metric rows, newest first, each carrying the path that produced it: a proxied request's chain, or a reachability probe row whose chain starts with "local" (the engine's own network dialing an outbound's server). Failed rows carry a reason slug classifying the failure (dns_timeout, connect_refused, proxy_auth, proxy_timeout, tunnel_unavailable, tls_handshake, tls_cert, header_timeout, body_timeout, timeout, reset_eof, unknown, ...) alongside the full error string; rows recorded before classification existed have none. n defaults to 100; values above 10000 are capped; invalid values fall back to the default.
 //	@Tags         metrics
 //	@Produce      json
 //	@Param        n query int false "Number of records to return (default 100, max 10000)" default(100) maximum(10000)
@@ -848,7 +848,7 @@ type probeRunRequest struct {
 // runProbes godoc
 //
 //	@Summary      Run an HTTP reachability probe round now
-//	@Description  Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — "outbound:<id>", "pool:<id>", "chain:<id>", a bare id, or "direct" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with "probe". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine.
+//	@Description  Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — "outbound:<id>", "pool:<id>", "chain:<id>", a bare id, or "direct" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Failed results classify the failure: phase names the leg that failed ("dns"/"connect" = local→proxy-server, "proxy" = the proxy's handshake, "tls"/"headers"/"body" = proxy→target) and reason is a stable slug (dns_timeout, connect_refused, proxy_auth, header_timeout, body_timeout, ...); the phase timings routeDial/dns/connect/tls/ttfb show where the time went, and dialAddr/dialVia report the first-hop address and the outbound a pool or chain route picked. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with "probe". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine.
 //	@Tags         probes
 //	@Accept       json
 //	@Produce      json
@@ -903,7 +903,7 @@ func (s *Server) probesRun(w http.ResponseWriter, r *http.Request) {
 // listProbeResults godoc
 //
 //	@Summary      List recent HTTP probe results
-//	@Description  Returns up to n recent HTTP probe records, newest first: for each (target, route) pair the response status, headers, body (capped, with truncated set when it was), latency, and time. Both manual runs and scheduled rounds land here. Optionally filtered to one route reference.
+//	@Description  Returns up to n recent HTTP probe records, newest first: for each (target, route) pair the response status, headers, body (capped, with truncated set when it was), latency, and time. Failed records also carry phase and reason: phase says which leg failed — "dns"/"connect" are the local→proxy-server leg, "proxy" is the proxy's handshake, "tls"/"headers"/"body" are beyond the proxy toward the target — and reason is a stable slug (dns_timeout, connect_refused, proxy_auth, proxy_timeout, tunnel_unavailable, tls_handshake, tls_cert, header_timeout, body_timeout, reset_eof, ...). dialAddr is the address the first hop actually connected to (the proxy server for a proxy route), dialVia the outbound a pool or chain route picked, and routeDial/dns/connect/tls/ttfb the per-phase timings (zero where a phase was not observable, e.g. under gvisor or a tunnel protocol). Both manual runs and scheduled rounds land here. Optionally filtered to one route reference.
 //	@Tags         probes
 //	@Produce      json
 //	@Param        n query int false "Number of records to return (default 100, max 10000)" default(100) maximum(10000)

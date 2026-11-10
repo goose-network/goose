@@ -127,7 +127,9 @@ func (m *Manager) Reconfigure(cfg config.ExitCheckConfig) {
 // disabled. Restarting on every engine config bump would discard the cron
 // timer's phase, so we compare the fields that shape the schedule. Sites are
 // compared by content: a changed list must take effect on the next round,
-// and length alone cannot see one URL swapped for another.
+// and length alone cannot see one URL swapped for another. Nil-ness is
+// compared first because content comparison cannot see it, and it is exactly
+// the transition that flips the round between built-in defaults and none.
 func (m *Manager) scheduleUnchanged(next config.ExitCheckConfig) bool {
 	if m.running == nil {
 		return false
@@ -136,6 +138,7 @@ func (m *Manager) scheduleUnchanged(next config.ExitCheckConfig) bool {
 	return r.Enabled == next.Enabled &&
 		r.Cron == next.Cron &&
 		r.IntervalSec == next.IntervalSec &&
+		(r.Sites == nil) == (next.Sites == nil) &&
 		slices.Equal(r.Sites, next.Sites) &&
 		r.TimeoutSec == next.TimeoutSec &&
 		r.Concurrency == next.Concurrency
@@ -163,8 +166,9 @@ func (m *Manager) Close() {
 // "run the configured round now" — and works with the scheduler disabled,
 // which is what makes a one-off check possible without a cron entry.
 type RunSpec struct {
-	// Sites are the check-site URLs to ask for this run; empty uses the
-	// config's list (or the built-in defaults when that is empty too).
+	// Sites are the check-site URLs to ask for this run; empty or omitted
+	// uses the config's list (or the built-in defaults when the config
+	// never set one).
 	Sites []string `json:"sites,omitempty"`
 	// Outbounds restricts the run to these outbound ids; empty checks every
 	// address-bearing outbound.
@@ -289,8 +293,15 @@ func (m *Manager) runRound(ctx context.Context, cfg config.ExitCheckConfig, only
 		return nil
 	}
 	sites := cfg.Sites
-	if len(sites) == 0 {
+	if sites == nil {
+		// nil means "no list was ever set": use the built-in defaults. An
+		// explicit empty list means the operator deleted every site, which
+		// must stay deleted — recreating defaults here would make them
+		// undeletable.
 		sites = defaultSites
+	}
+	if len(sites) == 0 {
+		return nil // every check site was deleted: nothing to ask
 	}
 	timeout := cfg.EffectiveTimeoutSec()
 	conc := cfg.EffectiveConcurrency()

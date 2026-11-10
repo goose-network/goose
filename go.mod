@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/goose-network/goose-plugin-api v0.0.1
-	github.com/goose-network/goose-plugin-psiphon v0.0.1
+	github.com/goose-network/goose-plugin-psiphon v0.0.3
 	github.com/goose-network/tor-go v0.0.8
 	github.com/stretchr/testify v1.12.1
 	go.etcd.io/bbolt v1.4.0

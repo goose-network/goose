@@ -128,14 +128,20 @@ type Recorder interface {
 
 // RequestMetric is the persisted record of one proxied request.
 type RequestMetric struct {
-	ID         string        `json:"id"`
-	InboundID  string        `json:"inboundID"`
-	User       string        `json:"user"`
-	Network    Network       `json:"network"`
-	Target     string        `json:"target"`
-	Chain      []string      `json:"chain"`
-	Success    bool          `json:"success"`
-	Error      string        `json:"error"`
+	ID        string   `json:"id"`
+	InboundID string   `json:"inboundID"`
+	User      string   `json:"user"`
+	Network   Network  `json:"network"`
+	Target    string   `json:"target"`
+	Chain     []string `json:"chain"`
+	Success   bool     `json:"success"`
+	Error     string   `json:"error"`
+	// Reason is a stable slug classifying the failure (dns_timeout,
+	// connect_refused, tls_handshake, header_timeout, body_timeout, ...),
+	// empty on success and on rows recorded before classification existed.
+	// The Error string keeps the full diagnostic; Reason is what a table
+	// column or a filter can group on without parsing prose.
+	Reason     string        `json:"reason,omitempty"`
 	Latency    time.Duration `json:"latency"`
 	StartedAt  time.Time     `json:"startedAt"`
 	FinishedAt time.Time     `json:"finishedAt"`
@@ -259,9 +265,51 @@ type HTTPProbe struct {
 	Body string `json:"body"`
 	// Truncated reports that the body was capped, so a regex over it may
 	// miss a match that a full download would have found.
-	Truncated bool          `json:"truncated"`
-	Success   bool          `json:"success"`
-	Error     string        `json:"error"`
+	Truncated bool   `json:"truncated"`
+	Success   bool   `json:"success"`
+	Error     string `json:"error"`
+	// Phase locates a failure along the request path: "dns" and "connect"
+	// are the local→proxy-server leg (for a direct route, local→target),
+	// "proxy" is the proxy's own handshake or relay setup after its TCP
+	// port was reached, and "tls", "headers" and "body" are beyond the
+	// proxy on the proxy→target leg. "request" is a malformed spec. Empty
+	// on success and on rows recorded before phases existed.
+	Phase string `json:"phase,omitempty"`
+	// Reason is a stable slug classifying the failure (dns_timeout,
+	// dns_nxdomain, dns_failure, connect_refused, connect_timeout,
+	// connect_unreachable, route_invalid, route_unavailable, proxy_auth,
+	// proxy_rejected, proxy_timeout, tunnel_unavailable, tls_handshake,
+	// tls_cert, tls_timeout, header_timeout, body_timeout, timeout,
+	// reset_eof, decode_error, canceled, round_budget, bad_request,
+	// unknown). Empty on success.
+	Reason string `json:"reason,omitempty"`
+	// DialAddr is the address the first hop actually connected to — the
+	// proxy server for a proxy route, the target itself for a direct one.
+	// Empty when the dial was not observable (a tunnel protocol whose
+	// server connections ride a background context, a stack that bypasses
+	// net.Dialer, an older row).
+	DialAddr string `json:"dialAddr,omitempty"`
+	// DialVia is the outbound that served the route's dial: for a pool or
+	// chain route it names the member picked at dial time (last attempt wins
+	// on a failover), for an "outbound:<id>" route it repeats the id. Empty
+	// for a direct route, and when the route failed before an outbound was
+	// picked.
+	DialVia string `json:"dialVia,omitempty"`
+	// Phase timings, each the span of its own phase — except TTFB, which
+	// is measured from the request start — and zero when a phase did not
+	// run or was not observable. RouteDial spans the whole route
+	// dial — the local→proxy TCP connect plus the proxy's handshake toward
+	// the target (a tunnel protocol's stream acquisition) — and is the one
+	// timing every stack provides. DNS and Connect break out the first
+	// hop's resolution and TCP connect when the stack fires the standard
+	// trace hooks; TLS is the end-to-end handshake with the target; TTFB
+	// is when the first response byte arrived.
+	RouteDial time.Duration `json:"routeDial,omitempty"`
+	DNS       time.Duration `json:"dns,omitempty"`
+	Connect   time.Duration `json:"connect,omitempty"`
+	TLS       time.Duration `json:"tls,omitempty"`
+	TTFB      time.Duration `json:"ttfb,omitempty"`
+
 	Latency   time.Duration `json:"latency"`
 	StartedAt time.Time     `json:"startedAt"`
 }

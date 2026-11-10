@@ -277,9 +277,14 @@ opts out entirely.
 
 See the [Psiphon provider plugin](../goose-plugin-psiphon) for a real example: it starts
 a tunnel-core tunnel with the background remote-server-list fetcher enabled
-(so the server list auto-updates like the Psiphon Windows client) and
-exposes the tunnel's local SOCKS proxy as a single socks5 outbound in the
-managed pool.
+(so the server list auto-updates like the Psiphon Windows client) and emits
+one in-memory `psiphon` outbound per server in the signed list — dials go
+straight into tunnel-core's controller, with no local SOCKS listener in
+between. The general tunnel (tunnel-core's own per-connection server
+choice) keeps running underneath — it hosts the server-list fetcher and the
+datastore, and hand-written general outbounds still dial through it — but
+is deliberately not emitted as an outbound: no single address describes
+where its traffic exits.
 
 The [geph provider](../geph5-go/plugins/geph) is a second bundled example of
 the same shape: it embeds the geph5-go client (a wire-compatible Go port of
@@ -321,6 +326,23 @@ those rows:
   single-hop and chain request rows (`GET /api/metrics`). Rounds run on the
   configured interval and are nudged on rebuild so new outbounds are probed
   promptly.
+- **HTTP probes** (`internal/router/httpprobe.go`) — on-demand runs behind
+  `POST /api/probes/run` (history: `GET /api/probes/results`; the web UI's
+  Probes page) fetch a target URL through a route and attribute the outcome
+  to a leg. Two layers of observation: a route-dial bracket around the
+  transport's dial always measures the local→proxy hop (any stack, any
+  protocol), and `httptrace` hooks add DNS / connect / TLS / first-byte
+  phase timings when the dial goes through `net.Dialer` — under gvisor or
+  an in-memory tunnel the hooks never fire and the record degrades to the
+  route-dial total. Each result names the first-hop address dialed
+  (`dialAddr`) and the outbound that served it (`dialVia`, e.g. the pool
+  member picked at dial time); failures classify into a phase (`request`,
+  `dns`, `connect`, `proxy`, `tls`, `headers`, `body`) plus a reason slug
+  (`dns_timeout`, `connect_refused`, `proxy_timeout`, `body_timeout`, ...)
+  — typed errors first (`net.DNSError`, x509, syscall errnos, timeouts),
+  route and plugin error vocabularies as fallback. The single metrics row a
+  probe records carries the same reason; probe rows stay informational and
+  never feed the reachability verdicts.
 - **Metrics store** (`internal/metrics`) derives a per-outbound
   reachability verdict from those rows: probe rows record both outcomes (a
   probe is a bare TCP dial, so a failure really means unreachable), and a
@@ -356,7 +378,11 @@ IP, latency, time)` tuples:
 - **Load spreading** — rounds rotate round-robin across the site list, and
   within a round successive outbounds hit different sites, with a
   concurrency cap; a large batch therefore spreads over several sites
-  instead of hammering one (rate limits / accidental DDoS).
+  instead of hammering one (rate limits / accidental DDoS). `sites: null`
+  (or absent) selects the built-in defaults; an explicit empty list means
+  every site was deleted — the web UI makes the defaults deletable — and
+  switches the checks off. The scheduler compares nilness, not just
+  contents, so deleting the last site restarts the loop into the off state.
 - **Persistence** — the metrics store keeps results in the `exitchecks`
   bucket; `GET /api/exit-checks?n=&outbound_id=` lists them newest-first,
   `POST /api/exit-checks/run` triggers a round on demand, and the web UI's

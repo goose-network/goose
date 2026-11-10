@@ -11,9 +11,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -172,6 +175,8 @@ func TestHTTPProbeDefaultsToEveryOutbound(t *testing.T) {
 	assert.True(t, byRoute["outbound:relay"].Success, byRoute["outbound:relay"].Error)
 	assert.False(t, byRoute["outbound:work"].Success, "a blocked route must fail")
 	assert.Contains(t, byRoute["outbound:work"].Error, "blocked by local network")
+	assert.Equal(t, phaseConnect, byRoute["outbound:work"].Phase,
+		"the local→proxy leg failed, even when the reason is unclassifiable")
 	assert.Zero(t, byRoute["outbound:work"].Status, "no response arrived")
 }
 
@@ -403,11 +408,188 @@ func TestHTTPProbeDecodesCallerAcceptEncoding(t *testing.T) {
 func TestHTTPProbeUnissuedJobLeavesNoRow(t *testing.T) {
 	_, ms := newProbeOnlyRouter(t)
 	p := assembleProbe(core.HTTPProbeSpec{Method: "GET"}, "http://example.com/ip", "direct",
-		time.Now(), 0, nil, "", false, context.Canceled)
+		time.Now(), probeOutcome{err: context.Canceled, stage: stageQueue})
 	assert.False(t, p.Success)
 	assert.Contains(t, p.Error, "context canceled")
+	assert.Equal(t, reasonRoundBudget, p.Reason, "an unissued job is a round-budget casualty, not a path failure")
+	assert.Empty(t, p.Phase, "no leg of the path was involved")
 
 	rows, err := ms.RecentHTTPProbes(10, "")
 	require.NoError(t, err)
 	assert.Empty(t, rows, "a request that never left must not be recorded")
+}
+
+// TestHTTPProbeSuccessCarriesPathEvidence verifies a successful row shows
+// where the time went: the route-dial total (which every stack provides), the
+// connect and first-byte timings the trace hooks observed, and the address the
+// first hop connected to.
+func TestHTTPProbeSuccessCarriesPathEvidence(t *testing.T) {
+	r, _ := newProbeOnlyRouter(t)
+	target := probeTarget(t)
+
+	res, err := r.RunHTTPProbes(context.Background(), core.HTTPProbeSpec{
+		Targets: []string{target.URL + "/ip"},
+		Routes:  []string{"direct"},
+		Timeout: 10 * time.Second,
+	})
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	p := res[0]
+	require.True(t, p.Success, p.Error)
+
+	assert.Empty(t, p.Phase, "a success has no failure phase")
+	assert.Empty(t, p.Reason)
+	assert.Greater(t, p.RouteDial, time.Duration(0), "the route dial is always bracketed")
+	assert.Greater(t, p.Connect, time.Duration(0), "the system stack fires the connect hooks")
+	assert.Greater(t, p.TTFB, time.Duration(0), "the first response byte was observed")
+
+	// A direct route's first hop is the target itself.
+	u, err := url.Parse(target.URL)
+	require.NoError(t, err)
+	assert.Equal(t, u.Host, p.DialAddr)
+	assert.Empty(t, p.DialVia, "a direct route picks no outbound")
+}
+
+// TestHTTPProbeOutboundRouteNamesServerAndVia verifies the leg attribution a
+// probe through an outbound reports: the connected address is the PROXY
+// SERVER (the local→proxy leg), not the target, and a pool route names the
+// member its failover picked.
+func TestHTTPProbeOutboundRouteNamesServerAndVia(t *testing.T) {
+	f := newReachFixture(t, false)
+	target := probeTarget(t)
+
+	res, err := f.router.RunHTTPProbes(context.Background(), core.HTTPProbeSpec{
+		Targets: []string{target.URL},
+		Routes:  []string{"outbound:relay", "pool:relays"},
+		Timeout: 10 * time.Second,
+	})
+	require.NoError(t, err)
+	require.Len(t, res, 2)
+
+	pinned, pooled := res[0], res[1]
+	require.True(t, pinned.Success, pinned.Error)
+	require.True(t, pooled.Success, pooled.Error)
+
+	assert.Equal(t, f.rAddr, pinned.DialAddr, "the connect hook must see the proxy server, not the target")
+	assert.Equal(t, "relay", pinned.DialVia, "a pinned outbound route reports the outbound that served it")
+
+	assert.Equal(t, f.rAddr, pooled.DialAddr)
+	assert.Equal(t, "relay", pooled.DialVia, "the pool's picked member is reported")
+}
+
+// stalledTCPServer accepts TCP connections and never writes: the local network
+// can reach it, but a proxy handshake through it never completes.
+func stalledTCPServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var held []net.Conn
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			c.Close()
+		}
+	})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// TestHTTPProbeClassifiesFailureLegs is the requirement behind Phase and
+// Reason: a failed probe says WHICH leg failed — local→proxy or proxy→target
+// — and why, with the full error still on Error.
+func TestHTTPProbeClassifiesFailureLegs(t *testing.T) {
+	f := newReachFixture(t, true) // the local network blocks the work server
+
+	// A proxy server that accepts TCP and then never answers its handshake:
+	// the local→proxy leg succeeds; the proxy itself stalls.
+	stalled := stalledTCPServer(t)
+	f.cfg.SetOutbound(&config.OutboundSpec{ID: "stalled", Protocol: "socks5", Config: map[string]any{"address": stalled}})
+
+	// A target that answers headers and then stalls mid-body.
+	slowBody := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, rq *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "partial")
+		w.(http.Flusher).Flush()
+		<-rq.Context().Done() // released as soon as the probe gives up
+	}))
+	t.Cleanup(slowBody.Close)
+
+	// A target that accepts the TCP connection and never answers.
+	silent := stalledTCPServer(t)
+	f.router.Rebuild()
+	target := probeTarget(t)
+
+	cases := []struct {
+		name   string
+		target string
+		route  string
+		phase  string
+		reason string
+	}{
+		{"target port refused", "http://127.0.0.1:1/ip", "direct", phaseConnect, reasonConnectRefused},
+		{"target accepts, never answers", "http://" + silent, "direct", phaseHeaders, reasonHeaderTimeout},
+		{"target stalls mid-body", slowBody.URL, "direct", phaseBody, reasonBodyTimeout},
+		{"proxy handshake stalls", target.URL, "outbound:stalled", phaseProxy, reasonProxyTimeout},
+		{"local network blocks the proxy server", target.URL, "outbound:work", phaseConnect, reasonUnknown},
+		{"route not configured", target.URL, "outbound:nope", phaseRequest, reasonRouteInvalid},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := f.router.RunHTTPProbes(context.Background(), core.HTTPProbeSpec{
+				Targets: []string{tc.target},
+				Routes:  []string{tc.route},
+				Timeout: 500 * time.Millisecond,
+			})
+			require.NoError(t, err)
+			require.Len(t, res, 1)
+			p := res[0]
+			require.False(t, p.Success, "expected a failure, got status %d", p.Status)
+			assert.NotEmpty(t, p.Error, "the full diagnostic survives classification")
+			assert.Equal(t, tc.phase, p.Phase, "error was %q", p.Error)
+			assert.Equal(t, tc.reason, p.Reason, "error was %q", p.Error)
+		})
+	}
+}
+
+// TestProbeMetricRowCarriesReason verifies the metric row beside a probe row
+// carries the same classified reason, so the metrics table can group probe
+// failures without parsing prose.
+func TestProbeMetricRowCarriesReason(t *testing.T) {
+	r, ms := newProbeOnlyRouter(t)
+
+	res, err := r.RunHTTPProbes(context.Background(), core.HTTPProbeSpec{
+		Targets: []string{"http://127.0.0.1:1/ip"},
+		Routes:  []string{"direct"},
+		Timeout: 5 * time.Second,
+	})
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	require.False(t, res[0].Success)
+	require.Equal(t, reasonConnectRefused, res[0].Reason)
+
+	require.Eventually(t, func() bool {
+		rows, err := ms.Recent(50)
+		require.NoError(t, err)
+		for _, m := range rows {
+			if len(m.Chain) == 2 && m.Chain[0] == core.HopProbe {
+				assert.Equal(t, res[0].Reason, m.Reason, "the metric row carries the probe's classified reason")
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "probe metric row never landed")
 }

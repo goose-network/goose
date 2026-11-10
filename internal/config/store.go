@@ -227,7 +227,9 @@ type ExitCheckConfig struct {
 	// Sites are exit-IP check URLs that respond with the caller's IP as
 	// plain text (e.g. https://ifconfig.me). Checks rotate round-robin
 	// across this list so large batches spread load instead of tripping one
-	// site's rate limits. Empty selects the built-in defaults.
+	// site's rate limits. Null or absent selects the built-in defaults; an
+	// explicit empty list switches checks off — every site was deleted,
+	// which is how the web UI makes the built-in defaults deletable.
 	Sites []string `json:"sites"`
 	// TimeoutSec bounds each check. Default 15; minimum 1.
 	TimeoutSec int `json:"timeout_seconds"`
@@ -736,7 +738,7 @@ func (s *Store) SetProviderOutbounds(providerID string, specs []*OutboundSpec) {
 	// This walks the provider-managed pools only: fedPoolsLocked-style
 	// membership (a pool references a managed outbound) is NOT ownership.
 	// The operator may hand-build a pool pinning a provider-owned outbound
-	// (e.g. one pool that routes through the provider's general outbound);
+	// (e.g. one pool that pins a single per-server outbound of a provider);
 	// a provider poll must leave such pools alone, or the outbound's pool
 	// would vanish at the next poll and the policy referencing it would
 	// silently degrade to the all-outbounds fallback.

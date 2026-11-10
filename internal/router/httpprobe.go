@@ -21,6 +21,10 @@
 // row with Chain [core.HopProbe, route] so the metrics table shows probe
 // traffic alongside request and dial-probe rows. Neither feeds the
 // reachability verdicts routing filters on — see core.HopProbe for why.
+//
+// Every row carries the path's phase timings and, on failure, a classified
+// phase and reason (probetrace.go, errclass.go) answering which leg failed —
+// local→proxy or proxy→target — and why.
 package router
 
 import (
@@ -150,8 +154,10 @@ func (r *Router) RunHTTPProbes(ctx context.Context, spec core.HTTPProbeSpec) ([]
 				// request that never left must not stand in history as a
 				// failed probe: it would displace real rows and read as a
 				// dead route.
-				results[i] = assembleProbe(spec, j.target, j.route, time.Now(), 0, nil, "", false,
-					fmt.Errorf("round ended before the request was issued: %w", ctx.Err()))
+				results[i] = assembleProbe(spec, j.target, j.route, time.Now(), probeOutcome{
+					err:   fmt.Errorf("round ended before the request was issued: %w", ctx.Err()),
+					stage: stageQueue,
+				})
 				return
 			}
 			defer func() { <-sem }()
@@ -191,21 +197,41 @@ func (r *Router) probeRoutes(routes []string) []string {
 	return out
 }
 
+// probeOutcome is everything one probe request produced: the response data
+// (kept even when a later step failed — a body read error must not discard
+// the status and headers that arrived) plus how it failed: the stage that
+// errored and the trace of the path the request took.
+type probeOutcome struct {
+	status    int
+	header    http.Header
+	body      string
+	truncated bool
+	err       error
+	stage     string
+	timings   phaseTimings
+}
+
 // probeOneHTTP performs one (target, route) request and records it.
 func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, target, route string, timeout time.Duration, bodyLimit int) core.HTTPProbe {
 	pctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
+	tr := newProbeTrace(start)
+	pctx = withProbeTrace(pctx, tr)
 
 	req, err := newProbeRequest(pctx, spec, target)
 	if err != nil {
-		return r.probeResult(spec, target, route, start, 0, nil, "", false, err)
+		return r.probeResult(spec, target, route, start, probeOutcome{
+			err: err, stage: stageRequest, timings: tr.snapshot(),
+		})
 	}
 
-	client := &http.Client{Transport: r.probeTransport(route), Timeout: timeout}
+	client := &http.Client{Transport: r.probeTransport(route, tr), Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return r.probeResult(spec, target, route, start, 0, nil, "", false, err)
+		return r.probeResult(spec, target, route, start, probeOutcome{
+			err: err, stage: stageDo, timings: tr.snapshot(),
+		})
 	}
 	defer resp.Body.Close()
 
@@ -218,7 +244,10 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
 		gz, gerr := gzip.NewReader(resp.Body)
 		if gerr != nil {
-			return r.probeResult(spec, target, route, start, resp.StatusCode, resp.Header, "", false, gerr)
+			return r.probeResult(spec, target, route, start, probeOutcome{
+				status: resp.StatusCode, header: resp.Header, err: gerr,
+				stage: stageDecode, timings: tr.snapshot(),
+			})
 		}
 		defer gz.Close()
 		reader = gz
@@ -231,27 +260,36 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 	if truncated {
 		body = string(raw[:bodyLimit])
 	}
-	if readErr != nil && err == nil {
-		err = readErr
+	out := probeOutcome{
+		status: resp.StatusCode, header: resp.Header, body: body,
+		truncated: truncated, err: readErr, timings: tr.snapshot(),
 	}
-
-	return r.probeResult(spec, target, route, start, resp.StatusCode, resp.Header, body, truncated, err)
+	if readErr != nil {
+		out.stage = stageBody
+	}
+	return r.probeResult(spec, target, route, start, out)
 }
 
 // probeTransport builds the transport whose dials ride route: the route
 // dialer for a named route, the engine stack for none (which is also what
-// "direct" resolves to, one layer down).
-func (r *Router) probeTransport(route string) *http.Transport {
-	trans := &http.Transport{
-		DisableKeepAlives: true, // one request per route: no pooled conn reuse
-		DialContext:       r.stack.Dial,
-	}
+// "direct" resolves to, one layer down). Either way the dial is bracketed
+// for the trace: RouteDial is the one timing every stack and protocol
+// provides, and its error is what attributes a Do failure to the local→proxy
+// leg rather than the proxy→target one.
+func (r *Router) probeTransport(route string, tr *probeTrace) *http.Transport {
+	base := r.stack.Dial
 	if d := r.OutboundUpstreamDialer(route); d != nil {
-		trans.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return d.DialUpstream(ctx, network, addr)
-		}
+		base = d.DialUpstream
 	}
-	return trans
+	return &http.Transport{
+		DisableKeepAlives: true, // one request per route: no pooled conn reuse
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			tr.noteRouteDialStart()
+			conn, err := base(ctx, network, addr)
+			tr.noteRouteDialEnd(err)
+			return conn, err
+		},
+	}
 }
 
 // newProbeRequest builds the request: spec's method (GET by default), headers
@@ -292,15 +330,16 @@ func newProbeRequest(ctx context.Context, spec core.HTTPProbeSpec, target string
 // returns it. success is transport-level: a response arrived. A 500 or a
 // failed assertion is still a reachable route — the caller's expectations
 // decide whether the response was the right one.
-func (r *Router) probeResult(spec core.HTTPProbeSpec, target, route string, start time.Time, status int, header http.Header, body string, truncated bool, err error) core.HTTPProbe {
-	p := assembleProbe(spec, target, route, start, status, header, body, truncated, err)
-	r.recordProbe(p, target, err, start)
+func (r *Router) probeResult(spec core.HTTPProbeSpec, target, route string, start time.Time, out probeOutcome) core.HTTPProbe {
+	p := assembleProbe(spec, target, route, start, out)
+	r.recordProbe(p, target, out.err, start)
 	return p
 }
 
 // assembleProbe builds one result row without recording it, for jobs whose
-// request never left (a round cancelled while they waited for a slot).
-func assembleProbe(spec core.HTTPProbeSpec, target, route string, start time.Time, status int, header http.Header, body string, truncated bool, err error) core.HTTPProbe {
+// request never left (a round cancelled while they waited for a slot) and as
+// the shared assembly step of probeResult.
+func assembleProbe(spec core.HTTPProbeSpec, target, route string, start time.Time, out probeOutcome) core.HTTPProbe {
 	latency := time.Since(start)
 	method := strings.ToUpper(strings.TrimSpace(spec.Method))
 	if method == "" {
@@ -311,16 +350,24 @@ func assembleProbe(spec core.HTTPProbeSpec, target, route string, start time.Tim
 		Route:     route,
 		Target:    target,
 		Method:    method,
-		Status:    status,
-		Headers:   flattenHeaders(header),
-		Body:      body,
-		Truncated: truncated,
-		Success:   err == nil,
+		Status:    out.status,
+		Headers:   flattenHeaders(out.header),
+		Body:      out.body,
+		Truncated: out.truncated,
+		Success:   out.err == nil,
 		Latency:   latency,
 		StartedAt: start,
+		RouteDial: out.timings.RouteDial,
+		DNS:       out.timings.DNS,
+		Connect:   out.timings.Connect,
+		TLS:       out.timings.TLS,
+		TTFB:      out.timings.TTFB,
+		DialAddr:  out.timings.DialAddr,
+		DialVia:   out.timings.DialVia,
 	}
-	if err != nil {
-		p.Error = err.Error()
+	if out.err != nil {
+		p.Error = out.err.Error()
+		p.Phase, p.Reason = classifyProbeFailure(out.stage, out.err, out.timings)
 	}
 	return p
 }
@@ -342,7 +389,10 @@ func (r *Router) recordProbe(p core.HTTPProbe, target string, err error, start t
 			}
 		}
 	}
-	r.record(meta, []string{core.HopProbe, p.Route}, err == nil, err, p.Latency)
+	// The metric row carries the probe's own classified reason; re-running
+	// the generic classifier here would lose the stage and trace the probe
+	// row was built from.
+	r.recordWithReason(meta, []string{core.HopProbe, p.Route}, err == nil, err, p.Latency, p.Reason)
 }
 
 // flattenHeaders joins a repeated response header's values with ", " so one

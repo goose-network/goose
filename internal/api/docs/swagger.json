@@ -749,7 +749,7 @@
         },
         "/api/metrics": {
             "get": {
-                "description": "Returns up to n recent outbound metric rows, newest first, each carrying the path that produced it: a proxied request's chain, or a reachability probe row whose chain starts with \"local\" (the engine's own network dialing an outbound's server). n defaults to 100; values above 10000 are capped; invalid values fall back to the default.",
+                "description": "Returns up to n recent outbound metric rows, newest first, each carrying the path that produced it: a proxied request's chain, or a reachability probe row whose chain starts with \"local\" (the engine's own network dialing an outbound's server). Failed rows carry a reason slug classifying the failure (dns_timeout, connect_refused, proxy_auth, proxy_timeout, tunnel_unavailable, tls_handshake, tls_cert, header_timeout, body_timeout, timeout, reset_eof, unknown, ...) alongside the full error string; rows recorded before classification existed have none. n defaults to 100; values above 10000 are capped; invalid values fall back to the default.",
                 "produces": [
                     "application/json"
                 ],
@@ -1394,7 +1394,7 @@
         },
         "/api/probes/results": {
             "get": {
-                "description": "Returns up to n recent HTTP probe records, newest first: for each (target, route) pair the response status, headers, body (capped, with truncated set when it was), latency, and time. Both manual runs and scheduled rounds land here. Optionally filtered to one route reference.",
+                "description": "Returns up to n recent HTTP probe records, newest first: for each (target, route) pair the response status, headers, body (capped, with truncated set when it was), latency, and time. Failed records also carry phase and reason: phase says which leg failed — \"dns\"/\"connect\" are the local→proxy-server leg, \"proxy\" is the proxy's handshake, \"tls\"/\"headers\"/\"body\" are beyond the proxy toward the target — and reason is a stable slug (dns_timeout, connect_refused, proxy_auth, proxy_timeout, tunnel_unavailable, tls_handshake, tls_cert, header_timeout, body_timeout, reset_eof, ...). dialAddr is the address the first hop actually connected to (the proxy server for a proxy route), dialVia the outbound a pool or chain route picked, and routeDial/dns/connect/tls/ttfb the per-phase timings (zero where a phase was not observable, e.g. under gvisor or a tunnel protocol). Both manual runs and scheduled rounds land here. Optionally filtered to one route reference.",
                 "produces": [
                     "application/json"
                 ],
@@ -1451,7 +1451,7 @@
         },
         "/api/probes/run": {
             "post": {
-                "description": "Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — \"outbound:\u003cid\u003e\", \"pool:\u003cid\u003e\", \"chain:\u003cid\u003e\", a bare id, or \"direct\" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with \"probe\". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine.",
+                "description": "Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — \"outbound:\u003cid\u003e\", \"pool:\u003cid\u003e\", \"chain:\u003cid\u003e\", a bare id, or \"direct\" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Failed results classify the failure: phase names the leg that failed (\"dns\"/\"connect\" = local→proxy-server, \"proxy\" = the proxy's handshake, \"tls\"/\"headers\"/\"body\" = proxy→target) and reason is a stable slug (dns_timeout, connect_refused, proxy_auth, header_timeout, body_timeout, ...); the phase timings routeDial/dns/connect/tls/ttfb show where the time went, and dialAddr/dialVia report the first-hop address and the outbound a pool or chain route picked. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with \"probe\". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2046,7 +2046,7 @@
                     "type": "integer"
                 },
                 "sites": {
-                    "description": "Sites are exit-IP check URLs that respond with the caller's IP as\nplain text (e.g. https://ifconfig.me). Checks rotate round-robin\nacross this list so large batches spread load instead of tripping one\nsite's rate limits. Empty selects the built-in defaults.",
+                    "description": "Sites are exit-IP check URLs that respond with the caller's IP as\nplain text (e.g. https://ifconfig.me). Checks rotate round-robin\nacross this list so large batches spread load instead of tripping one\nsite's rate limits. Null or absent selects the built-in defaults; an\nexplicit empty list switches checks off — every site was deleted,\nwhich is how the web UI makes the built-in defaults deletable.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -2342,6 +2342,20 @@
                     "description": "Body is the response body, capped at the probe's MaxBodyBytes.",
                     "type": "string"
                 },
+                "connect": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "dialAddr": {
+                    "description": "DialAddr is the address the first hop actually connected to — the\nproxy server for a proxy route, the target itself for a direct one.\nEmpty when the dial was not observable (a tunnel protocol whose\nserver connections ride a background context, a stack that bypasses\nnet.Dialer, an older row).",
+                    "type": "string"
+                },
+                "dialVia": {
+                    "description": "DialVia is the outbound that served the route's dial: for a pool or\nchain route it names the member picked at dial time (last attempt wins\non a failover), for an \"outbound:\u003cid\u003e\" route it repeats the id. Empty\nfor a direct route, and when the route failed before an outbound was\npicked.",
+                    "type": "string"
+                },
+                "dns": {
+                    "$ref": "#/definitions/time.Duration"
+                },
                 "error": {
                     "type": "string"
                 },
@@ -2361,8 +2375,24 @@
                 "method": {
                     "type": "string"
                 },
+                "phase": {
+                    "description": "Phase locates a failure along the request path: \"dns\" and \"connect\"\nare the local→proxy-server leg (for a direct route, local→target),\n\"proxy\" is the proxy's own handshake or relay setup after its TCP\nport was reached, and \"tls\", \"headers\" and \"body\" are beyond the\nproxy on the proxy→target leg. \"request\" is a malformed spec. Empty\non success and on rows recorded before phases existed.",
+                    "type": "string"
+                },
+                "reason": {
+                    "description": "Reason is a stable slug classifying the failure (dns_timeout,\ndns_nxdomain, dns_failure, connect_refused, connect_timeout,\nconnect_unreachable, route_invalid, route_unavailable, proxy_auth,\nproxy_rejected, proxy_timeout, tunnel_unavailable, tls_handshake,\ntls_cert, tls_timeout, header_timeout, body_timeout, timeout,\nreset_eof, decode_error, canceled, round_budget, bad_request,\nunknown). Empty on success.",
+                    "type": "string"
+                },
                 "route": {
                     "type": "string"
+                },
+                "routeDial": {
+                    "description": "Phase timings, each the span of its own phase — except TTFB, which\nis measured from the request start — and zero when a phase did not\nrun or was not observable. RouteDial spans the whole route\ndial — the local→proxy TCP connect plus the proxy's handshake toward\nthe target (a tunnel protocol's stream acquisition) — and is the one\ntiming every stack provides. DNS and Connect break out the first\nhop's resolution and TCP connect when the stack fires the standard\ntrace hooks; TLS is the end-to-end handshake with the target; TTFB\nis when the first response byte arrived.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/time.Duration"
+                        }
+                    ]
                 },
                 "startedAt": {
                     "type": "string"
@@ -2377,9 +2407,15 @@
                 "target": {
                     "type": "string"
                 },
+                "tls": {
+                    "$ref": "#/definitions/time.Duration"
+                },
                 "truncated": {
                     "description": "Truncated reports that the body was capped, so a regex over it may\nmiss a match that a full download would have found.",
                     "type": "boolean"
+                },
+                "ttfb": {
+                    "$ref": "#/definitions/time.Duration"
                 }
             }
         },
@@ -2423,6 +2459,10 @@
                 "network": {
                     "$ref": "#/definitions/core.Network"
                 },
+                "reason": {
+                    "description": "Reason is a stable slug classifying the failure (dns_timeout,\nconnect_refused, tls_handshake, header_timeout, body_timeout, ...),\nempty on success and on rows recorded before classification existed.\nThe Error string keeps the full diagnostic; Reason is what a table\ncolumn or a filter can group on without parsing prose.",
+                    "type": "string"
+                },
                 "startedAt": {
                     "type": "string"
                 },
@@ -2452,7 +2492,7 @@
                     }
                 },
                 "sites": {
-                    "description": "Sites are the check-site URLs to ask for this run; empty uses the\nconfig's list (or the built-in defaults when that is empty too).",
+                    "description": "Sites are the check-site URLs to ask for this run; empty or omitted\nuses the config's list (or the built-in defaults when the config\nnever set one).",
                     "type": "array",
                     "items": {
                         "type": "string"

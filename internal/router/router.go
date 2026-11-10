@@ -639,7 +639,15 @@ func applyFilters(filters []core.Filter, pool []core.Outbound, meta core.Metadat
 	return out
 }
 
+// record writes the request metric row for one finished request. Failed rows
+// carry the generically classified reason (typed errors only — dispatch has
+// no stage or path trace); a path that classifies precisely, like the HTTP
+// prober, passes its own reason via recordWithReason.
 func (r *Router) record(meta core.Metadata, chain []string, success bool, err error, dur time.Duration) {
+	r.recordWithReason(meta, chain, success, err, dur, classifyErr(err))
+}
+
+func (r *Router) recordWithReason(meta core.Metadata, chain []string, success bool, err error, dur time.Duration, reason string) {
 	m := core.RequestMetric{
 		ID:         fmt.Sprintf("%d", atomic.AddUint64(&r.metricSeq, 1)),
 		InboundID:  meta.InboundID,
@@ -648,6 +656,7 @@ func (r *Router) record(meta core.Metadata, chain []string, success bool, err er
 		Target:     meta.Target(),
 		Chain:      append([]string{}, chain...),
 		Success:    success,
+		Reason:     reason,
 		Latency:    dur,
 		StartedAt:  meta.StartedAt,
 		FinishedAt: time.Now(),

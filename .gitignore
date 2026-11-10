@@ -16,6 +16,7 @@
 *.mmdb
 qqwry.dat
 zxinc.dat
+psiphon-data/
 
 # Editor / OS
 .idea/

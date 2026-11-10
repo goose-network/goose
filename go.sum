@@ -239,8 +239,8 @@ github.com/goose-network/goose-plugin-api v0.0.1 h1:9WpZ5ShKe7gcDo5P72+8ae/r6mgJ
 github.com/goose-network/goose-plugin-api v0.0.1/go.mod h1:EYQF1WhEU/JhxP3SkSSjAWLBlnazvrj0Ex1EL4G3oHY=
 github.com/goose-network/goose-plugin-mihomo v0.0.1 h1:zhnVwVfvDCnFw0ukBK1ETYDKvQ0iU6aTtmSnTcc33go=
 github.com/goose-network/goose-plugin-mihomo v0.0.1/go.mod h1:jWvh0KOQOZ2F8pRQcum+ZqlAYRNnuA214Fhih/uN47s=
-github.com/goose-network/goose-plugin-psiphon v0.0.1 h1:GL1RsgSJYzjLUZCy2iKPJ04bnzToM8ovCqLrkwntiEY=
-github.com/goose-network/goose-plugin-psiphon v0.0.1/go.mod h1:t8jCDpz4x8ZOeSIIV9XlNF46Qo81By2zRepHCzvNy30=
+github.com/goose-network/goose-plugin-psiphon v0.0.3 h1:lZJyp6u1vPMiqH0l7+hyxaB5qqYN9w4R8SoEbhwlBkk=
+github.com/goose-network/goose-plugin-psiphon v0.0.3/go.mod h1:YBWGamOfHAaSrZGN9Kvy4uYkmJns1G8updhV8cvS4c4=
 github.com/goose-network/goose-plugin-singbox v0.0.1 h1:snS9T8ApGKvpjvweIx8QxZhp/sU03rCkDB7CY1omLoo=
 github.com/goose-network/goose-plugin-singbox v0.0.1/go.mod h1:ARx1dPR7w0WZorIkqxlllqFBpa9udlyWaSDyfGqZ8Q8=
 github.com/goose-network/openrung-go v0.0.1 h1:QP7jqqskX9nL7frykBrqS+YHAe6UaVZ46GGv4p1ne+w=

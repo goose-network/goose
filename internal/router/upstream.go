@@ -172,7 +172,17 @@ func (r *Router) dialUpstreamChain(ctx context.Context, id string, meta core.Met
 	// r.chains is replaced wholesale on rebuild and never mutated in place,
 	// so the snapshot chain stays valid after the lock is released; dialChain
 	// copies each layer's candidate pool under its own lock before dialing.
-	conn, _, err := r.dialChain(ctx, ch, meta)
+	conn, chainIDs, err := r.dialChain(ctx, ch, meta)
+	// Report the chain's first hop on a probe trace: it is the member whose
+	// local dial decided the route, and its server address is the local→proxy
+	// leg the trace's phase timings attribute.
+	if len(chainIDs) > 0 {
+		addr := ""
+		if out, ok := r.lookupOutbound(chainIDs[0]); ok {
+			addr = out.Address()
+		}
+		noteUpstreamVia(ctx, chainIDs[0], addr)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("router: upstream_proxy chain %s: %w", id, err)
 	}
@@ -189,6 +199,7 @@ func (r *Router) dialUpstreamOutbound(ctx context.Context, id string, meta core.
 	dialCtx, cancel := context.WithTimeout(ctx, upstreamDialTimeout)
 	defer cancel()
 	conn, err := r.CheckDial(dialCtx, out, meta.Network, meta.Target())
+	noteUpstreamVia(ctx, id, out.Address())
 	if err != nil {
 		return nil, fmt.Errorf("router: upstream_proxy outbound %s: %w", id, err)
 	}
@@ -255,6 +266,10 @@ func (r *Router) dialPoolSnapshot(ctx context.Context, what string, snap poolSna
 		dialCtx, cancel := context.WithTimeout(ctx, upstreamDialTimeout)
 		conn, derr := r.CheckDial(dialCtx, out, meta.Network, meta.Target())
 		cancel()
+		// Report the member this attempt rode on a probe trace; last attempt
+		// wins, so a success names the member that served it and a total
+		// failure names the member tried last.
+		noteUpstreamVia(ctx, out.ID(), out.Address())
 		if derr == nil {
 			return conn, nil
 		}
