@@ -359,6 +359,20 @@ func (r *Router) Dial(ctx context.Context, meta core.Metadata) (net.Conn, []stri
 	if meta.StartedAt.IsZero() {
 		meta.StartedAt = time.Now()
 	}
+	if meta.Path == nil {
+		// A caller that does not observe (a test, a Handler wired elsewhere):
+		// its failure row still gets a graph. Both inbound listeners create
+		// the recorder themselves, so the success row Bridge records from the
+		// caller's own copy of meta carries the same one.
+		meta.Path = core.NewPathRecorder()
+	}
+	meta.Path.SetClassifier(classifyLeg)
+	meta.Path.AddLocal()
+	meta.Path.AddTarget(meta.TargetHost, meta.TargetPort)
+	// The ctx carrier reaches the two seams that see no Metadata: CheckDial's
+	// callers and routeDialer.DialUpstream, which builds a fresh Metadata.
+	ctx = core.WithPathRecorder(ctx, meta.Path)
+
 	chain := r.resolveChain(meta.InboundID, meta.User)
 	upstream, chainIDs, err := r.dialChain(ctx, chain, meta)
 	if err != nil {
@@ -517,16 +531,46 @@ func (r *Router) dialLayers(ctx context.Context, layers []snapshottedLayer, meta
 	for i, h := range hops {
 		chainIDs = append(chainIDs, h.ID())
 
+		// Name this hop's own node before anything it dials toward. The
+		// recorder keeps insertion order and PathGraph.Nodes documents proxies
+		// in dial order, so a node named ahead of the hop that reaches it
+		// publishes the route out of order.
+		hop := hopNodeID(meta.Path, h)
+
 		// Hop i's dial target: hop i+1's proxy-server address, or the
 		// request's target for the final hop.
 		target := meta.Target()
+		// The node the final hop tunnels toward. TargetNodeIDFor refuses a
+		// target node naming a different destination, which is what keeps a
+		// nested upstream chain (sharing the outer request's recorder while
+		// dialing a different address) from pointing its last leg at the
+		// outer request's target.
+		to := meta.Path.TargetNodeIDFor(meta.TargetHost, meta.TargetPort)
+		if to == "" {
+			to = meta.Path.AddServer(target)
+		}
 		if i+1 < len(hops) {
 			if next := hops[i+1].Address(); next != "" {
 				target = next
 			}
+			// Name the successor now, so hop i's tunnel leg has a real node to
+			// point at. It is named second, which is what makes the node list
+			// read in dial order rather than in reverse.
+			to = hopNodeID(meta.Path, hops[i+1])
+			if to == "" {
+				to = meta.Path.AddServer(target)
+			}
+			if to == "" {
+				to = meta.Path.TargetNodeIDFor(meta.TargetHost, meta.TargetPort)
+			}
+		}
+		legs := hopLegs{
+			hop:    hop,
+			to:     to,
+			target: target,
 		}
 
-		dialed, err, consumed := r.dialOutbound(ctx, h, conn, meta, target)
+		dialed, err, consumed := r.dialOutbound(ctx, h, conn, meta, legs)
 		if err != nil {
 			if conn != nil {
 				conn.Close()
@@ -583,37 +627,83 @@ type poolSelector struct {
 	pool []core.Outbound
 }
 
-// dialOutbound dials an outbound toward target. If prev is non-nil, the
+// dialOutbound dials an outbound toward legs.target. If prev is non-nil, the
 // outbound's server is reached through prev (chaining) and the outbound then
-// CONNECTs toward target through that tunnel; otherwise the outbound dials
-// target through its own server via the engine stack. The returned consumed
-// flag is true when prev was handed off to the outbound (DialThrough took
-// ownership); false when the dial fell back to a direct dial and prev is
+// CONNECTs toward the target through that tunnel; otherwise the outbound dials
+// the target through its own server via the engine stack. The returned
+// consumed flag is true when prev was handed off to the outbound (DialThrough
+// took ownership); false when the dial fell back to a direct dial and prev is
 // still the caller's responsibility to close.
-func (r *Router) dialOutbound(ctx context.Context, o core.Outbound, prev net.Conn, meta core.Metadata, target string) (net.Conn, error, bool) {
+//
+// Each branch brackets the dial in legs' recorder, so the graph records the
+// dial that actually happened — including the collapse to a direct dial, which
+// is a fact about this hop that no configuration lookup can tell.
+func (r *Router) dialOutbound(ctx context.Context, o core.Outbound, prev net.Conn, meta core.Metadata, legs hopLegs) (net.Conn, error, bool) {
+	rec := meta.Path
 	if prev == nil {
-		// first hop: outbound dials target through its own server via stack.
-		c, err := o.DialContext(ctx, meta.Network, target)
+		// First hop: the outbound dials legs.target through its own server via
+		// the engine stack, so one call covers the arrival at its server and
+		// the handshake toward legs.to. A hop with no server of its own
+		// (legs.hop == "", direct) leaves To empty, and the leg is then the
+		// engine's own dial toward legs.to. When such a plugin reached
+		// legs.to through an upstream route of its own, that route has already
+		// recorded the arrival here — the recorder recognises this bracket as
+		// the same physical leg, records no second edge and adopts no socket
+		// for legs.to, so the destination keeps the address config named.
+		c, err := rec.Observe(core.Leg{
+			Kind: core.LegDial, To: legs.hop, Through: legs.to, Target: legs.target,
+		}, nil, func() (net.Conn, error) {
+			return o.DialContext(ctx, meta.Network, legs.target)
+		})
 		return c, err, false
 	}
-	// chaining: dial the next outbound's server through prev, then have it
-	// connect to the target. This requires the outbound to support a
-	// "dial through given conn" mode. We expose that via the ChainDialer
-	// interface; outbounds that don't implement it fall back to dialing
-	// directly (single-hop semantics). The wrapper is transparent: assert
-	// ChainDialer on the unwrapped plugin outbound, not the wrapper.
-	inner := o
-	if w, ok := o.(interface{ Unwrap() core.Outbound }); ok {
-		inner = w.Unwrap()
+	cd, ok := chainDialer(o)
+	if !ok {
+		// No chaining support: the hop re-dials from the local network and the
+		// previous conn is dropped. Collapsed says so on the edge, and From is
+		// the local node rather than legs.prev — the leg really did leave the
+		// engine host, and the tunnel the hop before it established is wasted.
+		// An upstream route running inside this dial records its own legs from
+		// local too, which makes this bracket nested; the recorder then credits
+		// the member's socket to the member's node and leaves this hop's own
+		// address as configured.
+		// prev is NOT consumed; the caller closes it.
+		c, err := rec.Observe(core.Leg{
+			Kind: core.LegDial, To: legs.hop, Through: legs.to,
+			Target: legs.target, Collapsed: true,
+		}, nil, func() (net.Conn, error) {
+			return o.DialContext(ctx, meta.Network, legs.target)
+		})
+		return c, err, false
 	}
-	if cd, ok := inner.(ChainDialer); ok {
-		c, err := cd.DialThrough(ctx, meta.Network, target, prev)
+	if legs.hop == "" {
+		// A hop with no server of its own (direct): DialThrough hands prev
+		// back unchanged, so this call opens no socket and has no leg of its
+		// own to bracket. The previous hop's tunnel edge covers the leg only
+		// when the recorder is standing at legs.to — it is not when this hop
+		// configures an address (the previous hop tunneled toward a server:
+		// node standing for it) or when a node cap swallowed the vertex.
+		// Nothing honest can be recorded for the gap: the conn returned here
+		// does not go to legs.to. The graph says it may be incomplete instead
+		// of claiming a leg nobody observed.
+		if rec.LastNodeID() != legs.to {
+			rec.NotePartial()
+		}
+		c, err := cd.DialThrough(ctx, meta.Network, legs.target, prev)
 		return c, err, true
 	}
-	// no chaining support: dial directly (chain collapses to this hop).
-	// prev is NOT consumed; caller closes it.
-	c, err := o.DialContext(ctx, meta.Network, target)
-	return c, err, false
+	// prev already reaches this hop's server — the previous hop's tunnel leg
+	// put it there — so what this call adds is this hop's own handshake toward
+	// legs.to. Its socket is prev's, whose peer is the PREVIOUS hop's server:
+	// a chain holds exactly one engine socket and that hop's own dial leg
+	// already adopted it, so passing prev as via keeps the recorder from
+	// crediting legs.to with an address the leg did not produce.
+	c, err := rec.Observe(core.Leg{
+		Kind: core.LegTunnel, From: legs.hop, To: legs.to, Target: legs.target,
+	}, prev, func() (net.Conn, error) {
+		return cd.DialThrough(ctx, meta.Network, legs.target, prev)
+	})
+	return c, err, true
 }
 
 // ChainDialer is an optional capability an outbound plugin implements to
@@ -648,6 +738,17 @@ func (r *Router) record(meta core.Metadata, chain []string, success bool, err er
 }
 
 func (r *Router) recordWithReason(meta core.Metadata, chain []string, success bool, err error, dur time.Duration, reason string) {
+	r.recordRow(meta, chain, success, err, dur, reason, meta.Path.Snapshot())
+}
+
+// recordRow builds and enqueues one metric row. path is the already-snapshotted
+// graph (nil when nothing was observed), never the recorder itself: the
+// snapshot is deep-copied and sealed, so the metrics writer's json.Marshal —
+// which can run hundreds of milliseconds later, on another goroutine — reads
+// state nothing can mutate any more. A producer that already snapshotted (the
+// HTTP prober, which puts the same graph on its probe row) passes its own
+// pointer rather than copying twice.
+func (r *Router) recordRow(meta core.Metadata, chain []string, success bool, err error, dur time.Duration, reason string, path *core.PathGraph) {
 	m := core.RequestMetric{
 		ID:         fmt.Sprintf("%d", atomic.AddUint64(&r.metricSeq, 1)),
 		InboundID:  meta.InboundID,
@@ -660,6 +761,7 @@ func (r *Router) recordWithReason(meta core.Metadata, chain []string, success bo
 		Latency:    dur,
 		StartedAt:  meta.StartedAt,
 		FinishedAt: time.Now(),
+		Path:       path,
 	}
 	if err != nil {
 		m.Error = err.Error()

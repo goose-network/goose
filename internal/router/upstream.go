@@ -127,6 +127,13 @@ func (d *routeDialer) DialUpstream(ctx context.Context, network, address string)
 	if host, port, err := net.SplitHostPort(address); err == nil {
 		meta.TargetHost, meta.TargetPort = host, port
 	}
+	// The recorder rides the caller's ctx: a plugin's own dialServer calls this
+	// from inside a hop the dispatch path is already observing, and the legs
+	// this route dials belong to that same graph. A provider fetch has no
+	// recorder in its ctx, so this is nil and every Observe below degenerates
+	// to calling the dial. The ctx value is inherited by the WithValue
+	// derivation above, so nested DialUpstream calls keep finding it.
+	meta.Path = core.PathRecorderFromContext(ctx)
 	return d.r.dialUpstream(ctx, d.route, meta)
 }
 
@@ -136,7 +143,20 @@ func (d *routeDialer) DialUpstream(ctx context.Context, network, address string)
 // traffic.
 func (r *Router) dialUpstream(ctx context.Context, route string, meta core.Metadata) (net.Conn, error) {
 	if route == "" || route == "direct" {
-		return r.stack.Dial(ctx, string(meta.Network), meta.Target())
+		// A bare engine-stack dial toward the fetch target. AddServer unifies
+		// with a node already standing for this address, so an outbound whose
+		// upstream_proxy is direct does not grow a second vertex for the
+		// server the outer hop already named.
+		//
+		// From is left empty: this stack leaves the engine host through the
+		// engine stack, whatever the outer dispatch was doing on the recorder
+		// before it.
+		to := meta.Path.AddServer(meta.Target())
+		return meta.Path.Observe(core.Leg{
+			Kind: core.LegStack, To: to, Target: meta.Target(),
+		}, nil, func() (net.Conn, error) {
+			return r.stack.Dial(ctx, string(meta.Network), meta.Target())
+		})
 	}
 	kind, id := splitRoute(route)
 	switch kind {
@@ -198,12 +218,59 @@ func (r *Router) dialUpstreamOutbound(ctx context.Context, id string, meta core.
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, upstreamDialTimeout)
 	defer cancel()
-	conn, err := r.CheckDial(dialCtx, out, meta.Network, meta.Target())
+	to := meta.Path.AddProxy(id, out.Address())
+	// From is left empty: a route dial always leaves the engine host through
+	// the engine stack, so it starts at local. Naming the recorder's last node
+	// instead would fabricate an edge from wherever the outer dispatch had got
+	// to, and would hand the outer hop's socket address to the wrong node.
+	conn, err := meta.Path.Observe(core.Leg{
+		Kind: core.LegDial, To: to, Target: meta.Target(),
+	}, nil, func() (net.Conn, error) {
+		return r.CheckDial(dialCtx, out, meta.Network, meta.Target())
+	})
 	noteUpstreamVia(ctx, id, out.Address())
 	if err != nil {
 		return nil, fmt.Errorf("router: upstream_proxy outbound %s: %w", id, err)
 	}
+	noteUpstreamArrival(meta, to)
 	return conn, nil
+}
+
+// noteUpstreamArrival records the leg a nested route's winning dial established
+// toward the address it was dialing — the server of the hop that asked for the
+// route. Without it the graph would say the engine reached that server from
+// local, when it reached it through this route; with it, the recorder's
+// nested-arrival rule has already seen the outer hop's server, so the outer
+// hop's own arrival edge is recognised as the same physical leg: it is dropped
+// when the outer hop is the last one, and rewritten as a tunnel from the outer
+// server onward when the outer dispatch had another hop to reach. Either way
+// the nested chain reads local → route member → outer server, with the socket
+// each leg produced credited to the node that leg actually reached.
+//
+// The destination node is the nested meta's own target, never the outer
+// request's: TargetNodeIDFor refuses a target node naming a different
+// destination, and ServerNodeForArrival unifies with the node the outer hop
+// already registered for this address - preferring, among vertices that share
+// the address, the one whose dial bracket is still in flight and is not the
+// arrival's source.
+func noteUpstreamArrival(meta core.Metadata, from string) {
+	if meta.Path == nil || from == "" {
+		return
+	}
+	to := meta.Path.TargetNodeIDFor(meta.TargetHost, meta.TargetPort)
+	if to == "" {
+		to = meta.Path.ServerNodeForArrival(meta.Target(), from)
+	}
+	if to == "" || to == from {
+		return
+	}
+	// The handshake toward the destination happened inside the same plugin call
+	// that the arrival leg was timed for, so this leg is real but not
+	// separately timed — the same "one bracketed call, two physical legs" case
+	// PathEdge.Duration documents.
+	meta.Path.Observe(core.Leg{
+		Kind: core.LegTunnel, From: from, To: to, Target: meta.Target(), Untimed: true,
+	}, nil, func() (net.Conn, error) { return nil, nil })
 }
 
 // dialUpstreamPool dials through the members of one pool.
@@ -258,19 +325,34 @@ func (r *Router) dialPoolSnapshot(ctx context.Context, what string, snap poolSna
 		return nil, fmt.Errorf("router: upstream_proxy %s: no member passed filters", what)
 	}
 	var lastErr error
+	attempt := 0
 	for len(cands) > 0 {
 		out, err := snap.selector.Pick(cands, meta)
 		if err != nil {
 			return nil, fmt.Errorf("router: upstream_proxy %s select: %w", what, err)
 		}
+		// Every attempt is its own node, so a member that failed keeps its own
+		// address, error and classification instead of being overwritten by
+		// the member that won. Each attempt starts at the engine host too: the
+		// member dial rides the engine stack, not a socket the outer dispatch
+		// happened to leave open.
+		attempt++
+		to := meta.Path.AddProxyAttempt(out.ID(), out.Address(), attempt)
 		dialCtx, cancel := context.WithTimeout(ctx, upstreamDialTimeout)
-		conn, derr := r.CheckDial(dialCtx, out, meta.Network, meta.Target())
+		conn, derr := meta.Path.Observe(core.Leg{
+			Kind: core.LegDial, To: to, Target: meta.Target(),
+		}, nil, func() (net.Conn, error) {
+			return r.CheckDial(dialCtx, out, meta.Network, meta.Target())
+		})
 		cancel()
 		// Report the member this attempt rode on a probe trace; last attempt
 		// wins, so a success names the member that served it and a total
 		// failure names the member tried last.
 		noteUpstreamVia(ctx, out.ID(), out.Address())
 		if derr == nil {
+			// The winning member's handshake toward the destination happened
+			// inside the same call, so name the far end of that leg too.
+			noteUpstreamArrival(meta, to)
 			return conn, nil
 		}
 		lastErr = derr
