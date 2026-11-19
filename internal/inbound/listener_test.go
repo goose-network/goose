@@ -318,3 +318,213 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+// --- observed-path recorder creation ---
+
+// lisPHandler is a recording Handler for the path-recorder test. It keeps the
+// Metadata it was handed on EVERY Dial and EVERY Bridge, in call order, so a
+// test can pair them up per request.
+//
+// The pairing is the whole point: Metadata is passed by value and Bridge gets
+// no context, so the only way the observed path can reach the success row
+// Bridge records is a *core.PathRecorder the listener itself created and put on
+// Metadata before calling Dial.
+type lisPHandler struct {
+	mu      sync.Mutex
+	dials   []core.Metadata
+	bridges []core.Metadata
+	bridged chan struct{}
+}
+
+func newLisPHandler() *lisPHandler {
+	return &lisPHandler{bridged: make(chan struct{}, 8)}
+}
+
+func (h *lisPHandler) Dial(_ context.Context, meta core.Metadata) (net.Conn, []string, error) {
+	c, s := net.Pipe()
+	h.mu.Lock()
+	h.dials = append(h.dials, meta)
+	h.mu.Unlock()
+	// Nothing reads the pipe; Bridge closes both ends.
+	go func() { _ = s.Close() }()
+	return c, []string{"ob1"}, nil
+}
+
+func (h *lisPHandler) Bridge(inb, up net.Conn, meta core.Metadata) {
+	h.mu.Lock()
+	h.bridges = append(h.bridges, meta)
+	h.mu.Unlock()
+	_ = up.Close()
+	_ = inb.Close()
+	h.bridged <- struct{}{}
+}
+
+// waitBridges blocks until n Bridges have returned. Channel-synchronised, with
+// the timeout only as a failure guard.
+func (h *lisPHandler) waitBridges(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-h.bridged:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for Bridge call %d", i+1)
+		}
+	}
+}
+
+func (h *lisPHandler) snapshot() ([]core.Metadata, []core.Metadata) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	d := make([]core.Metadata, len(h.dials))
+	copy(d, h.dials)
+	b := make([]core.Metadata, len(h.bridges))
+	copy(b, h.bridges)
+	return d, b
+}
+
+// lisPConnectHTTP drives n HTTP CONNECT requests at addr. It waits for each
+// request's Bridge before starting the next one, so the handler's recorded
+// Dial and Bridge slices stay in matching order without any sleep.
+func lisPConnectHTTP(t *testing.T, addr string, h *lisPHandler, n int) {
+	t.Helper()
+	ack := "HTTP/1.1 200 Connection Established\r\n\r\n"
+	for i := 0; i < n; i++ {
+		c := dialListener(t, addr)
+		req := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+		if _, err := c.Write([]byte(req)); err != nil {
+			c.Close()
+			t.Fatalf("write CONNECT: %v", err)
+		}
+		if got := string(readN(t, c, len(ack))); got != ack {
+			c.Close()
+			t.Fatalf("CONNECT ack = %q, want %q", got, ack)
+		}
+		h.waitBridges(t, 1)
+		_ = c.Close()
+	}
+}
+
+// lisPConnectSOCKS5 drives n SOCKS5 CONNECT requests at addr, waiting for each
+// request's Bridge before starting the next (see lisPConnectHTTP).
+func lisPConnectSOCKS5(t *testing.T, addr string, h *lisPHandler, n int) {
+	t.Helper()
+	const host = "example.com"
+	for i := 0; i < n; i++ {
+		c := dialListener(t, addr)
+		if _, err := c.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+			c.Close()
+			t.Fatalf("write greeting: %v", err)
+		}
+		if resp := readN(t, c, 2); resp[1] != 0x00 {
+			c.Close()
+			t.Fatalf("method selection = 0x%02x, want 0x00", resp[1])
+		}
+		req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
+		req = append(req, host...)
+		req = append(req, 0x01, 0xBB) // port 443
+		if _, err := c.Write(req); err != nil {
+			c.Close()
+			t.Fatalf("write CONNECT request: %v", err)
+		}
+		if resp := readN(t, c, 10); resp[1] != 0x00 {
+			c.Close()
+			t.Fatalf("SOCKS5 reply = 0x%02x, want 0x00 (success)", resp[1])
+		}
+		h.waitBridges(t, 1)
+		_ = c.Close()
+	}
+}
+
+// TestListenersCreateThePathRecorder asserts both inbound protocols create the
+// request's *core.PathRecorder themselves, so Dial and Bridge see the SAME
+// pointer.
+//
+// That identity is load-bearing, not incidental: Metadata crosses both calls
+// BY VALUE, and Bridge receives no context at all, so a recorder created
+// anywhere downstream (the router's Dial, say) would be recorded into a copy
+// the listener never sees again and the success row Bridge writes would carry
+// no graph.
+func TestListenersCreateThePathRecorder(t *testing.T) {
+	const requests = 2
+
+	for _, tc := range []struct {
+		name     string
+		protocol string
+		drive    func(t *testing.T, addr string, h *lisPHandler, n int)
+	}{
+		{"http connect", "http", lisPConnectHTTP},
+		{"socks5 connect", "socks5", lisPConnectSOCKS5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newLisPHandler()
+			ln, err := New("in-"+tc.protocol, tc.protocol, "127.0.0.1:0",
+				NewAuthStore(nil), func(string) string { return "c" }, h)
+			if err != nil {
+				t.Fatalf("New(%s): %v", tc.protocol, err)
+			}
+			defer ln.Close()
+
+			// Each request is fully bridged before the next one starts, so
+			// dials[i] and bridges[i] are the same request.
+			tc.drive(t, ln.Address(), h, requests)
+
+			dials, bridges := h.snapshot()
+			if len(dials) != requests {
+				t.Fatalf("got %d Dial calls, want %d", len(dials), requests)
+			}
+			if len(bridges) != requests {
+				t.Fatalf("got %d Bridge calls, want %d", len(bridges), requests)
+			}
+
+			for i := 0; i < requests; i++ {
+				d, b := dials[i], bridges[i]
+
+				// The listener extracted the right destination.
+				if d.TargetHost != "example.com" || d.TargetPort != "443" {
+					t.Errorf("request %d: target = %s:%s, want example.com:443",
+						i, d.TargetHost, d.TargetPort)
+				}
+
+				// Non-nil on BOTH calls.
+				if d.Path == nil {
+					t.Errorf("request %d: Dial's Metadata.Path is nil; the listener must create it", i)
+					continue
+				}
+				if b.Path == nil {
+					t.Errorf("request %d: Bridge's Metadata.Path is nil; the listener must create it", i)
+					continue
+				}
+
+				// And the SAME pointer — the whole point.
+				if d.Path != b.Path {
+					t.Errorf("request %d: Dial and Bridge hold different recorders (%p vs %p); "+
+						"Bridge would record a row with no observed path", i, d.Path, b.Path)
+				}
+
+				// Metadata is by value: the listener filled Chain into its own
+				// copy between the two calls, so Dial saw none and Bridge saw
+				// the chain Dial returned.
+				if len(d.Chain) != 0 {
+					t.Errorf("request %d: Dial's Metadata.Chain = %v, want empty", i, d.Chain)
+				}
+				if len(b.Chain) != 1 || b.Chain[0] != "ob1" {
+					t.Errorf("request %d: Bridge's Metadata.Chain = %v, want [ob1]", i, b.Chain)
+				}
+
+				// One recorder per request, not one per listener.
+				for j := 0; j < i; j++ {
+					if dials[j].Path == d.Path {
+						t.Errorf("requests %d and %d share one recorder (%p); "+
+							"their graphs would merge", j, i, d.Path)
+					}
+				}
+
+				// It is a live recorder, not a placeholder: it can be
+				// snapshotted, and a fresh one has nothing observed yet.
+				if got := d.Path.Snapshot(); got != nil {
+					t.Errorf("request %d: a listener-created recorder should have observed nothing yet, got %+v", i, got)
+				}
+			}
+		})
+	}
+}

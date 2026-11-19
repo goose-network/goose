@@ -57,6 +57,16 @@ type Metadata struct {
 
 	// StartedAt is when the inbound accepted the request.
 	StartedAt time.Time
+
+	// Path accumulates the network path this request is observed taking: the
+	// engine host, each proxy server it actually rode and the target as nodes,
+	// with one edge per observed leg. The inbound listener creates it, so the
+	// same recorder reaches both Dial and the ctx-less Bridge; Router.Dial
+	// installs it on the request context for the dial seams that see no
+	// Metadata. Nil for callers that do not observe — every PathRecorder
+	// method is nil-safe. Never persisted: a row carries Path.Snapshot(), not
+	// the recorder.
+	Path *PathRecorder
 }
 
 // Target returns the dial string for the destination.
@@ -145,6 +155,15 @@ type RequestMetric struct {
 	Latency    time.Duration `json:"latency"`
 	StartedAt  time.Time     `json:"startedAt"`
 	FinishedAt time.Time     `json:"finishedAt"`
+	// Path is the observed network path as an adjacency list: the engine host,
+	// each proxy server the request actually rode (with the address it was
+	// reached at, and whether that came off the socket or the config), and the
+	// target as nodes, with one edge per observed leg carrying that leg's own
+	// span, outcome and classification. A pool failover records one edge per
+	// attempt, so the members that failed keep their own errors and the winner
+	// is the attempt whose leg succeeded. Absent on rows recorded before path
+	// observation existed and on rows whose path could not be observed at all.
+	Path *PathGraph `json:"path,omitempty"`
 }
 
 // HopLocal is the pseudo first-hop recorded on reachability-probe metric
@@ -309,6 +328,16 @@ type HTTPProbe struct {
 	Connect   time.Duration `json:"connect,omitempty"`
 	TLS       time.Duration `json:"tls,omitempty"`
 	TTFB      time.Duration `json:"ttfb,omitempty"`
+
+	// Path is the observed network path of this probe's route, as an adjacency
+	// list: the engine host, each proxy server the route actually rode and the
+	// target as nodes, one edge per observed leg with that leg's own span and
+	// outcome. Unlike the row's Phase — which names where the whole request
+	// broke — the graph names the leg that broke. A route with no proxy at all
+	// ("direct") yields local → target with no proxy node between them. Absent
+	// on rows recorded before path observation existed and on a job the round's
+	// budget cancelled before it was issued.
+	Path *PathGraph `json:"path,omitempty"`
 
 	Latency   time.Duration `json:"latency"`
 	StartedAt time.Time     `json:"startedAt"`

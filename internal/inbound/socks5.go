@@ -191,6 +191,11 @@ func (l *socks5Listener) handleRequest(c net.Conn, user string) error {
 		TargetPort: strconv.Itoa(int(port)),
 		SourceIP:   remoteIP(c),
 		StartedAt:  time.Now(),
+		// Created here rather than in the router, so the SAME recorder reaches
+		// both Dial and Bridge: Metadata is passed by value and Bridge gets no
+		// context, so only a pointer created at the seam that owns the request
+		// can carry the observed path to the success row.
+		Path: core.NewPathRecorder(),
 	}
 	// Clear the deadline; the router manages timeouts from here.
 	_ = c.SetDeadline(time.Time{})
