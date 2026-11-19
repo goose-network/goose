@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/goose-network/goose/internal/core"
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -209,6 +210,10 @@ type probeOutcome struct {
 	err       error
 	stage     string
 	timings   phaseTimings
+	// path is the request's observed network path, nil for a job that never
+	// left (the round's budget cancelled it) — a request that was never
+	// issued has no path to show.
+	path *core.PathRecorder
 }
 
 // probeOneHTTP performs one (target, route) request and records it.
@@ -218,11 +223,25 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 	start := time.Now()
 	tr := newProbeTrace(start)
 	pctx = withProbeTrace(pctx, tr)
+	// The path recorder is seeded here rather than in Dial, because a probe's
+	// graph is the ROUTE's: every leg is recorded inside the route machinery —
+	// DialUpstream/dialChain/dialPoolSnapshot, which the route dialer reaches
+	// through the ctx carrier below, a direct route's single stack leg included
+	// (dialUpstream's direct branch). probeTransport adds none of its own. The
+	// target node is named up front so a probe that fails before any dial still
+	// says what it was reaching for.
+	rec := core.NewPathRecorder()
+	rec.SetClassifier(classifyLeg)
+	rec.AddLocal()
+	if host, port := probeTargetHostPort(target); host != "" {
+		rec.AddTarget(host, port)
+	}
+	pctx = core.WithPathRecorder(pctx, rec)
 
 	req, err := newProbeRequest(pctx, spec, target)
 	if err != nil {
 		return r.probeResult(spec, target, route, start, probeOutcome{
-			err: err, stage: stageRequest, timings: tr.snapshot(),
+			err: err, stage: stageRequest, timings: tr.snapshot(), path: rec,
 		})
 	}
 
@@ -230,7 +249,7 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 	resp, err := client.Do(req)
 	if err != nil {
 		return r.probeResult(spec, target, route, start, probeOutcome{
-			err: err, stage: stageDo, timings: tr.snapshot(),
+			err: err, stage: stageDo, timings: tr.snapshot(), path: rec,
 		})
 	}
 	defer resp.Body.Close()
@@ -246,7 +265,7 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 		if gerr != nil {
 			return r.probeResult(spec, target, route, start, probeOutcome{
 				status: resp.StatusCode, header: resp.Header, err: gerr,
-				stage: stageDecode, timings: tr.snapshot(),
+				stage: stageDecode, timings: tr.snapshot(), path: rec,
 			})
 		}
 		defer gz.Close()
@@ -262,7 +281,7 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 	}
 	out := probeOutcome{
 		status: resp.StatusCode, header: resp.Header, body: body,
-		truncated: truncated, err: readErr, timings: tr.snapshot(),
+		truncated: truncated, err: readErr, timings: tr.snapshot(), path: rec,
 	}
 	if readErr != nil {
 		out.stage = stageBody
@@ -271,25 +290,81 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 }
 
 // probeTransport builds the transport whose dials ride route: the route
-// dialer for a named route, the engine stack for none (which is also what
-// "direct" resolves to, one layer down). Either way the dial is bracketed
-// for the trace: RouteDial is the one timing every stack and protocol
-// provides, and its error is what attributes a Do failure to the local→proxy
-// leg rather than the proxy→target one.
+// dialer, or the engine stack for an empty route (which is also what "direct"
+// resolves to, one layer down). Either way the dial is bracketed for the
+// trace: RouteDial is the one timing every stack and protocol provides, and
+// its error is what attributes a Do failure to the local→proxy leg rather than
+// the proxy→target one.
+//
+// It draws no leg of its own. Every leg of a probe's path — including a direct
+// route's single stack dial — is recorded inside dialUpstream/dialChain/
+// dialPoolSnapshot, which the route dialer reaches through the ctx carrier;
+// bracketing the dial here as well would draw the same legs twice. What the
+// closure does owe the recorder is where this dial leaves FROM: the transport
+// keeps no pooled conn (DisableKeepAlives), so a redirect hop is a fresh dial
+// from the engine host rather than a continuation of the path the previous
+// response arrived on. Without saying so, the recorder would read that dial as
+// a nested route re-reaching the node the last leg arrived at and either
+// suppress the leg or draw it leaving that node.
 func (r *Router) probeTransport(route string, tr *probeTrace) *http.Transport {
+	// An empty route cannot reach here: probeRoutes drops empty references and
+	// RunHTTPProbes rejects a round left with none, so the dialer is always the
+	// route's. The stack fallback keeps a nil dialer from being dereferenced.
+	d := r.OutboundUpstreamDialer(route)
 	base := r.stack.Dial
-	if d := r.OutboundUpstreamDialer(route); d != nil {
+	if d != nil {
 		base = d.DialUpstream
 	}
 	return &http.Transport{
 		DisableKeepAlives: true, // one request per route: no pooled conn reuse
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			tr.noteRouteDialStart()
+			core.PathRecorderFromContext(ctx).NoteLocalDial()
 			conn, err := base(ctx, network, addr)
 			tr.noteRouteDialEnd(err)
 			return conn, err
 		},
 	}
+}
+
+// probeTargetHostPort splits a probe target URL into the host and port the
+// transport will dial: the URL's own port or its scheme's default, and the host
+// in the spelling net/http dials with. An internationalized name is punycoded
+// first — net/http's canonicalAddr does the same before handing the address to
+// the dialer — so the recorder's target node and the address the dial reports
+// name one server; seeding the Unicode spelling instead misses AddServer's
+// address unification and the graph grows a duplicate origin vertex beside an
+// orphaned target. An all-ASCII host is left exactly as the URL spelled it
+// (net/http only punycodes a non-ASCII one), and so is a host the conversion
+// rejects: net/http keeps the raw spelling there too and lets the resolver
+// fail. Returns ("", "") for a URL that does not parse or names no host.
+func probeTargetHostPort(rawURL string) (host, port string) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return "", ""
+	}
+	host = u.Hostname()
+	ascii := true
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if !ascii {
+		if punycoded, ierr := idna.Lookup.ToASCII(host); ierr == nil {
+			host = punycoded
+		}
+	}
+	port = u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return host, port
 }
 
 // newProbeRequest builds the request: spec's method (GET by default), headers
@@ -369,6 +444,9 @@ func assembleProbe(spec core.HTTPProbeSpec, target, route string, start time.Tim
 		p.Error = out.err.Error()
 		p.Phase, p.Reason = classifyProbeFailure(out.stage, out.err, out.timings)
 	}
+	// Snapshot is memoized and seals the recorder, so the probe row and the
+	// metric row recordProbe writes carry the identical, immutable graph.
+	p.Path = out.path.Snapshot()
 	return p
 }
 
@@ -391,8 +469,10 @@ func (r *Router) recordProbe(p core.HTTPProbe, target string, err error, start t
 	}
 	// The metric row carries the probe's own classified reason; re-running
 	// the generic classifier here would lose the stage and trace the probe
-	// row was built from.
-	r.recordWithReason(meta, []string{core.HopProbe, p.Route}, err == nil, err, p.Latency, p.Reason)
+	// row was built from. It carries the probe's own graph too, already
+	// snapshotted — the same immutable pointer, so the two rows cannot
+	// disagree about the path.
+	r.recordRow(meta, []string{core.HopProbe, p.Route}, err == nil, err, p.Latency, p.Reason, p.Path)
 }
 
 // flattenHeaders joins a repeated response header's values with ", " so one

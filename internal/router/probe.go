@@ -226,13 +226,26 @@ func (r *Router) httpProbeRound(ctx context.Context) {
 func (r *Router) probeOne(ctx context.Context, timeout time.Duration, o core.Outbound) {
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	start := time.Now()
-	conn, err := r.stack.Dial(dctx, "tcp", o.Address())
+	// A reachability row measures the engine's own network reaching this proxy
+	// server, so its graph is exactly two nodes and one leg. The row's Target
+	// field is this same address — adding a target node would duplicate the
+	// server as a second vertex, which is what made the row read as a proxy
+	// dialing itself.
+	rec := core.NewPathRecorder()
+	rec.SetClassifier(classifyLeg)
+	rec.AddLocal()
+	node := rec.AddProxy(o.ID(), o.Address())
+	conn, err := rec.Observe(core.Leg{
+		Kind: core.LegStack, To: node, Target: o.Address(),
+	}, nil, func() (net.Conn, error) {
+		return r.stack.Dial(dctx, "tcp", o.Address())
+	})
 	lat := time.Since(start)
 	cancel()
 	if err == nil {
 		_ = conn.Close()
 	}
-	meta := core.Metadata{Network: core.NetworkTCP, StartedAt: start}
+	meta := core.Metadata{Network: core.NetworkTCP, StartedAt: start, Path: rec}
 	if host, port, serr := net.SplitHostPort(o.Address()); serr == nil {
 		meta.TargetHost, meta.TargetPort = host, port
 	}
