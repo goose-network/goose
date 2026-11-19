@@ -11,6 +11,18 @@ on:
   pull_request:
     paths:
       - "internal/api/**"
+      # The spec's record schemas are core.RequestMetric / core.HTTPProbe:
+      # swag follows their fields into core's definitions (PathGraph and
+      # friends), so a core-only change can make the committed spec stale.
+      - "internal/core/**"
+      # The Test step below runs -race over router/metrics/inbound too: the
+      # path graph threads core -> router -> metrics -> api, and a recorder
+      # regression (a race, a dishonest classification) shows up in those
+      # packages' tests even when nothing API-relevant changed. A PR touching
+      # only them must still get the build + test signal.
+      - "internal/router/**"
+      - "internal/metrics/**"
+      - "internal/inbound/**"
       - ".github/workflows/openapi.yml"
       - "Makefile"
       - "go.mod"
@@ -74,7 +86,12 @@ jobs:
         run: go build -tags with_quic ./...
 
       - name: Test
-        run: go test -tags with_quic ./internal/api/...
+        # The path graph threads core → router → metrics → api: a row now
+        # carries a core.PathGraph the router's dispatch and probe paths
+        # observe and the metrics store persists. Test all four together
+        # (with -race: the recorder is shared between the dispatch goroutine
+        # that observes legs and the writer goroutine that snapshots them).
+        run: go test -tags with_quic -race ./internal/api/... ./internal/core/... ./internal/metrics/... ./internal/router/...
 
   push-sdk:
     # Generate the TS SDK from this commit's spec and push the result to

@@ -3,6 +3,9 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -488,4 +491,405 @@ func TestProviderStatusEndpoint(t *testing.T) {
 	if code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST status: code %d, want 405", code)
 	}
+}
+
+// --- observed-path JSON surface ---
+//
+// A persisted row carries an immutable *core.PathGraph snapshot, so the JSON a
+// client sees is the graph the engine observed — and a row recorded by an
+// engine that could not observe one omits the key entirely rather than
+// serializing null or an empty graph.
+
+// apiPAddr is a fixed net.Addr for the inert conns an observed leg returns.
+type apiPAddr string
+
+func (a apiPAddr) Network() string { return "tcp" }
+func (a apiPAddr) String() string  { return string(a) }
+
+// apiPConn is the net.Conn an observed leg produced. Nothing reads or writes
+// it; the recorder only asks for RemoteAddr, which is the socket peer a node
+// adopts. An empty remote stands for a conn whose peer is not a dialable
+// host:port (an in-memory tunnel conn), which must NOT be adopted.
+type apiPConn struct{ remote net.Addr }
+
+func (c apiPConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c apiPConn) Write(b []byte) (int, error)      { return len(b), nil }
+func (c apiPConn) Close() error                     { return nil }
+func (c apiPConn) LocalAddr() net.Addr              { return apiPAddr("127.0.0.1:5555") }
+func (c apiPConn) RemoteAddr() net.Addr             { return c.remote }
+func (c apiPConn) SetDeadline(time.Time) error      { return nil }
+func (c apiPConn) SetReadDeadline(time.Time) error  { return nil }
+func (c apiPConn) SetWriteDeadline(time.Time) error { return nil }
+
+var apiPErrRefused = errors.New("dial tcp 203.0.113.7:1080: connect: connection refused")
+
+const (
+	apiPTarget     = "example.com:443"
+	apiPTargetHost = "example.com"
+	apiPTargetPort = "443"
+
+	apiPFirstAddr  = "203.0.113.7:1080" // failover attempt 1: refused
+	apiPSecondAddr = "203.0.113.8:1080" // failover attempt 2: arrives
+
+	apiPProxyID = "us-1"
+	apiPPhase   = "connect"
+	apiPReason  = "connect_refused"
+
+	apiPIDLocal  = core.NodeLocalID
+	apiPIDFirst  = core.NodeProxyPrefix + apiPProxyID
+	apiPIDSecond = core.NodeProxyPrefix + apiPProxyID + "#2"
+	apiPIDTarget = core.NodeTargetID
+)
+
+// apiPGraph builds a failover graph with a REAL recorder and returns its
+// sealed snapshot — the same way a router row produces one. Attempt 1 is
+// refused; attempt 2 arrives at its own server and handshakes toward the
+// target inside the same bracketed call, so that one call yields TWO edges:
+// the timed arrival, then a tunnel edge with Duration 0 and Observed true.
+func apiPGraph() *core.PathGraph {
+	rec := core.NewPathRecorder()
+	rec.SetClassifier(func(core.LegInfo, error) (string, string) {
+		return apiPPhase, apiPReason
+	})
+	rec.AddLocal()
+	target := rec.AddTarget(apiPTargetHost, apiPTargetPort)
+
+	first := rec.AddProxyAttempt(apiPProxyID, apiPFirstAddr, 1)
+	_, _ = rec.Observe(core.Leg{
+		Kind: core.LegDial, To: first, Through: target, Target: apiPTarget,
+	}, nil, func() (net.Conn, error) {
+		return nil, apiPErrRefused
+	})
+
+	second := rec.AddProxyAttempt(apiPProxyID, apiPSecondAddr, 2)
+	_, _ = rec.Observe(core.Leg{
+		Kind: core.LegDial, To: second, Through: target, Target: apiPTarget,
+	}, nil, func() (net.Conn, error) {
+		return apiPConn{remote: apiPAddr(apiPSecondAddr)}, nil
+	})
+
+	return rec.Snapshot()
+}
+
+// apiPDirectGraph builds the graph a "direct" route produces: local → target
+// with no proxy node between them, because Direct has no server of its own.
+func apiPDirectGraph() *core.PathGraph {
+	rec := core.NewPathRecorder()
+	rec.AddLocal()
+	target := rec.AddTarget(apiPTargetHost, apiPTargetPort)
+	_, _ = rec.Observe(core.Leg{
+		Kind: core.LegStack, To: target, Target: apiPTarget,
+	}, nil, func() (net.Conn, error) {
+		return apiPConn{remote: apiPAddr("")}, nil
+	})
+	return rec.Snapshot()
+}
+
+// apiPIDs projects a node list to its IDs in order.
+func apiPIDs(nodes []core.PathNode) []string {
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, n.ID)
+	}
+	return out
+}
+
+// apiPAssertGraph asserts the failover graph a client decoded off the wire.
+func apiPAssertGraph(t *testing.T, g *core.PathGraph) {
+	t.Helper()
+	if g == nil {
+		t.Fatal("decoded row carries no graph")
+	}
+	if len(g.Nodes) != 4 {
+		t.Fatalf("nodes = %v, want local + both attempts + target", apiPIDs(g.Nodes))
+	}
+	if got, want := strings.Join(apiPIDs(g.Nodes), ","),
+		strings.Join([]string{apiPIDLocal, apiPIDFirst, apiPIDSecond, apiPIDTarget}, ","); got != want {
+		t.Errorf("node order = %s, want %s", got, want)
+	}
+	// One node per attempt, so the loser keeps its own address and attempt
+	// number instead of being overwritten by the member that won.
+	if n := g.Nodes[1]; n.Address != apiPFirstAddr || n.AddressSource != core.AddrConfigured ||
+		n.Attempt != 1 || n.OutboundID != apiPProxyID {
+		t.Errorf("attempt-1 node = %+v, want %s configured, attempt 1", n, apiPFirstAddr)
+	}
+	if n := g.Nodes[2]; n.Address != apiPSecondAddr || n.AddressSource != core.AddrSocket ||
+		n.Attempt != 2 || n.OutboundID != apiPProxyID {
+		t.Errorf("attempt-2 node = %+v, want %s off the socket, attempt 2", n, apiPSecondAddr)
+	}
+	if n := g.Nodes[3]; n.Kind != core.NodeTarget || n.Host != apiPTargetHost ||
+		n.Port != apiPTargetPort || n.Address != apiPTarget {
+		t.Errorf("target node = %+v, want %s/%s", n, apiPTargetHost, apiPTargetPort)
+	}
+
+	if len(g.Edges) != 3 {
+		t.Fatalf("edges = %d, want the refusal + the arrival + the handshake", len(g.Edges))
+	}
+	lost := g.Edges[0]
+	if lost.From != apiPIDLocal || lost.To != apiPIDFirst || lost.Kind != core.LegDial ||
+		!lost.Observed || lost.Success || lost.Error != apiPErrRefused.Error() ||
+		lost.Phase != apiPPhase || lost.Reason != apiPReason {
+		t.Errorf("refused edge = %+v", lost)
+	}
+	won := g.Edges[1]
+	if won.From != apiPIDLocal || won.To != apiPIDSecond || won.Kind != core.LegDial ||
+		!won.Observed || !won.Success || won.Error != "" {
+		t.Errorf("winning edge = %+v", won)
+	}
+	tunnel := g.Edges[2]
+	if tunnel.From != apiPIDSecond || tunnel.To != apiPIDTarget || tunnel.Kind != core.LegTunnel ||
+		!tunnel.Observed || !tunnel.Success {
+		t.Errorf("handshake edge = %+v", tunnel)
+	}
+	if tunnel.Duration != 0 {
+		t.Errorf("handshake duration = %v, want 0: the second leg of one bracketed call is not separately timed", tunnel.Duration)
+	}
+	if g.Partial {
+		t.Error("a fully observed graph must not report Partial")
+	}
+	if g.Dropped != 0 {
+		t.Errorf("Dropped = %d, want 0", g.Dropped)
+	}
+}
+
+// apiPAwait polls cond until it holds or the deadline passes. DB writes are
+// batched asynchronously, so a test cannot read them back immediately.
+func apiPAwait(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// apiPRowsByIndex decodes an API array body into one raw object per element, so
+// a test can assert on key PRESENCE (omitempty) rather than decoded zeros.
+func apiPRowsByIndex(t *testing.T, body []byte) []map[string]json.RawMessage {
+	t.Helper()
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(body, &rows); err != nil {
+		t.Fatalf("unmarshal %s: %v", body, err)
+	}
+	return rows
+}
+
+// TestMetricsJSONOmitsAbsentPath asserts a stored row with no observed graph
+// serializes WITHOUT a "path" key — omitempty drops it, so an older engine's
+// row and a row whose path could not be observed look the same to a client and
+// neither decodes to an empty graph — while a row that carries one serializes
+// "nodes" and "edges".
+func TestMetricsJSONOmitsAbsentPath(t *testing.T) {
+	// The value the metrics store marshals into bbolt.
+	raw, err := json.Marshal(recordMetric())
+	if err != nil {
+		t.Fatalf("marshal path-less metric: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("unmarshal raw metric: %v", err)
+	}
+	if v, ok := keys["path"]; ok {
+		t.Fatalf("a path-less row must omit \"path\" entirely, got %s in %s", v, raw)
+	}
+	if _, ok := keys["chain"]; !ok {
+		t.Fatalf("sanity: the row itself serialized: %s", raw)
+	}
+
+	withPath := recordMetric()
+	withPath.ID = "withpath"
+	withPath.Path = apiPGraph()
+	raw, err = json.Marshal(withPath)
+	if err != nil {
+		t.Fatalf("marshal metric with path: %v", err)
+	}
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("unmarshal raw metric: %v", err)
+	}
+	graph, ok := keys["path"]
+	if !ok {
+		t.Fatalf("a row with a graph must serialize \"path\": %s", raw)
+	}
+	var graphKeys map[string]json.RawMessage
+	if err := json.Unmarshal(graph, &graphKeys); err != nil {
+		t.Fatalf("unmarshal path: %v", err)
+	}
+	for _, k := range []string{"nodes", "edges"} {
+		if _, ok := graphKeys[k]; !ok {
+			t.Errorf("graph is missing %q: %s", k, graph)
+		}
+	}
+
+	// And the same holds on the wire: /api/metrics re-serializes the rows it
+	// read back out of bbolt. Rows are keyed by StartedAt, so give them
+	// explicit, ordered timestamps rather than the zero time both would share.
+	hs, _, ms := newAPIServer(t, "")
+	base := time.Now().Add(-time.Hour)
+	noPath := recordMetric()
+	noPath.ID = "nopath"
+	noPath.StartedAt = base
+	noPath.FinishedAt = base.Add(time.Millisecond)
+	withPath.StartedAt = base.Add(-time.Minute)
+	withPath.FinishedAt = base.Add(-time.Minute + time.Millisecond)
+	if err := ms.Record(noPath); err != nil {
+		t.Fatalf("record path-less row: %v", err)
+	}
+	if err := ms.Record(withPath); err != nil {
+		t.Fatalf("record row with path: %v", err)
+	}
+
+	var body []byte
+	apiPAwait(t, "both metric rows to surface", func() bool {
+		code, b := do(t, hs, "GET", "/api/metrics", "", nil)
+		if code != http.StatusOK {
+			return false
+		}
+		body = b
+		return len(apiPRowsByIndex(t, b)) == 2
+	})
+
+	// Newest first, so the path-less row leads.
+	rows := apiPRowsByIndex(t, body)
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	if v, ok := rows[0]["path"]; ok {
+		t.Errorf("served path-less row carries \"path\": %s", v)
+	}
+	if _, ok := rows[1]["path"]; !ok {
+		t.Errorf("served row with a graph has no \"path\" key: %s", body)
+	}
+
+	var served []core.RequestMetric
+	if err := json.Unmarshal(body, &served); err != nil {
+		t.Fatalf("unmarshal /api/metrics body: %v", err)
+	}
+	if served[0].Path != nil {
+		t.Errorf("path-less row decoded to %+v, want nil", served[0].Path)
+	}
+	apiPAssertGraph(t, served[1].Path)
+}
+
+// TestProbeResultsJSONCarriesPath asserts GET /api/probes/results round-trips
+// the observed path: the graph the prober snapshotted reaches a client intact —
+// nodes in path order with the target last, one node per failover attempt with
+// its own address and address source, and the failed leg's classification —
+// while a probe whose route had no proxy carries the bare local → target graph.
+func TestProbeResultsJSONCarriesPath(t *testing.T) {
+	hs, _, ms := newAPIServer(t, "")
+	base := time.Now().Add(-time.Hour)
+
+	proxied := core.HTTPProbe{
+		ID: "p1", Route: "pool:default", Target: "https://example.com/ip", Method: "GET",
+		Status: 200, Success: true, Latency: 30 * time.Millisecond,
+		StartedAt: base, Path: apiPGraph(),
+	}
+	direct := core.HTTPProbe{
+		ID: "p2", Route: "direct", Target: "https://example.com/ip", Method: "GET",
+		Status: 200, Success: true, Latency: 10 * time.Millisecond,
+		StartedAt: base.Add(time.Minute), Path: apiPDirectGraph(),
+	}
+	// A row from an engine that observed nothing: no "path" key on the wire.
+	legacy := core.HTTPProbe{
+		ID: "p3", Route: "outbound:us-1", Target: "https://example.com/ip", Method: "GET",
+		Status: 502, Success: false, StartedAt: base.Add(2 * time.Minute),
+	}
+	for _, p := range []core.HTTPProbe{proxied, direct, legacy} {
+		if err := ms.RecordHTTPProbe(p); err != nil {
+			t.Fatalf("RecordHTTPProbe(%s): %v", p.ID, err)
+		}
+	}
+
+	code, body := do(t, hs, "GET", "/api/probes/results", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("GET /api/probes/results = %d, want 200: %s", code, body)
+	}
+
+	rows := apiPRowsByIndex(t, body)
+	if len(rows) != 3 {
+		t.Fatalf("got %d probe rows, want 3: %s", len(rows), body)
+	}
+	// Newest first: legacy, direct, proxied.
+	for i, id := range []string{"p3", "p2", "p1"} {
+		var row core.HTTPProbe
+		raw, err := json.Marshal(rows[i])
+		if err != nil {
+			t.Fatalf("re-marshal row %d: %v", i, err)
+		}
+		if err := json.Unmarshal(raw, &row); err != nil {
+			t.Fatalf("unmarshal row %d: %v", i, err)
+		}
+		if row.ID != id {
+			t.Errorf("row %d id = %q, want %q (newest first)", i, row.ID, id)
+		}
+	}
+
+	// The row with no observed path omits the key entirely.
+	if v, ok := rows[0]["path"]; ok {
+		t.Errorf("a probe with no graph must omit \"path\", got %s", v)
+	}
+	for i := 1; i < 3; i++ {
+		graph, ok := rows[i]["path"]
+		if !ok {
+			t.Fatalf("probe row %d has no \"path\": %s", i, body)
+		}
+		var graphKeys map[string]json.RawMessage
+		if err := json.Unmarshal(graph, &graphKeys); err != nil {
+			t.Fatalf("unmarshal probe path: %v", err)
+		}
+		for _, k := range []string{"nodes", "edges"} {
+			if _, ok := graphKeys[k]; !ok {
+				t.Errorf("probe row %d graph is missing %q: %s", i, k, graph)
+			}
+		}
+	}
+
+	var served []core.HTTPProbe
+	if err := json.Unmarshal(body, &served); err != nil {
+		t.Fatalf("unmarshal /api/probes/results body: %v", err)
+	}
+	if served[0].Path != nil {
+		t.Errorf("legacy probe decoded to %+v, want a nil path", served[0].Path)
+	}
+
+	// "direct" has no server, so its graph is just the engine host and the
+	// target with one stack leg between them.
+	g := served[1].Path
+	if g == nil {
+		t.Fatal("the direct probe lost its graph")
+	}
+	if got, want := strings.Join(apiPIDs(g.Nodes), ","), apiPIDLocal+","+apiPIDTarget; got != want {
+		t.Errorf("direct graph nodes = %s, want %s", got, want)
+	}
+	if len(g.Edges) != 1 {
+		t.Fatalf("direct graph edges = %d, want 1", len(g.Edges))
+	}
+	if e := g.Edges[0]; e.From != apiPIDLocal || e.To != apiPIDTarget ||
+		e.Kind != core.LegStack || !e.Observed || !e.Success {
+		t.Errorf("direct graph edge = %+v", e)
+	}
+	if g.Partial {
+		t.Error("a direct graph must not report Partial")
+	}
+
+	apiPAssertGraph(t, served[2].Path)
+
+	// The route filter keeps the graph.
+	code, body = do(t, hs, "GET", "/api/probes/results?route=pool:default", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("filtered GET = %d, want 200: %s", code, body)
+	}
+	var filtered []core.HTTPProbe
+	if err := json.Unmarshal(body, &filtered); err != nil {
+		t.Fatalf("unmarshal filtered body: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].ID != "p1" {
+		t.Fatalf("filtered rows = %+v, want only p1", filtered)
+	}
+	apiPAssertGraph(t, filtered[0].Path)
 }
