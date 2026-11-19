@@ -250,6 +250,52 @@ The `latency` filter (`min_success`, `max_ms`) narrows candidates by the same
 metrics on any pool or inbound policy, so a flaky hop stops serving traffic
 without any reachability machinery of its own.
 
+Both record kinds also carry the *observed network path* — `path` on every
+`GET /api/metrics` row and every probe result: the engine host (`local`), each
+proxy server the request actually dialed, and the target, with one edge per
+leg and that leg's own duration, outcome, and failure classification. Node ids
+are `local`, `proxy:<outboundID>` (`proxy:<outboundID>#<n>` for the n-th
+failover attempt), `server:<host:port>` for a server reached with no outbound
+behind it (an `upstream_proxy: direct` route — kind `proxy`, no `outboundID`),
+and `target`. Each proxy node carries the address it was reached at *and*
+where that address came from: `addressSource` is `socket` for the peer read
+off the connection the leg itself produced, and `configured` for the address
+the config claims — which a proxy may sit in front of, so the field is what
+makes an address trustworthy. Where a pool failover loop actually runs — an
+outbound's `upstream_proxy: pool:` route, or an HTTP probe's `pool:` route —
+each attempt gets its own edge, so the member that refused and the member that
+served the request are both visible instead of only the winner. Dispatch of a
+request through a chain does *not* fail over: the selector picks one member per
+layer and the first hop error ends the dial, so those rows carry one proxy
+node and no `attempt`.
+
+```json
+{ "path": { "nodes": [
+    { "id": "local", "kind": "local" },
+    { "id": "proxy:us-1", "kind": "proxy", "outboundID": "us-1", "address": "203.0.113.9:1080", "addressSource": "configured", "attempt": 1 },
+    { "id": "proxy:us-2#2", "kind": "proxy", "outboundID": "us-2", "address": "203.0.113.40:1080", "addressSource": "socket", "attempt": 2 },
+    { "id": "target", "kind": "target", "address": "example.com:443", "addressSource": "configured", "host": "example.com", "port": "443" }
+  ],
+  "edges": [
+    { "from": "local", "to": "proxy:us-1", "kind": "dial", "duration": 5001400000, "observed": true, "success": false, "error": "dial tcp 203.0.113.9:1080: i/o timeout", "phase": "connect", "reason": "connect_timeout" },
+    { "from": "local", "to": "proxy:us-2#2", "kind": "dial", "duration": 38700000, "observed": true, "success": true },
+    { "from": "proxy:us-2#2", "to": "target", "kind": "tunnel", "observed": true, "success": true }
+  ] } }
+```
+
+`duration` is nanoseconds, and a leg that was not separately timed (the
+handshake happened inside the same call as the leg before it) omits the key
+entirely rather than serializing a `0` — an absent `duration` means untimed,
+never instantaneous. `observed` is `true` on every leg the engine recorded: a
+leg it could not bracket is not emitted at all, and the graph says so with
+`partial` instead. `false` is reserved for a producer outside the engine that
+synthesizes a path from configuration. `collapsed` marks a chained hop that
+could not be dialed through the previous connection and re-dialed from the
+engine host, dropping the hop before it. `partial` / `dropped` say when the
+graph may be missing legs (a plugin dialed where the engine could not see) or
+hit its caps, and `path` itself is simply absent on rows an older engine
+recorded.
+
 ### Exit-IP checks (cron)
 
 A proxy's connect address is not its exit address — the public IP at the

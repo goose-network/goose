@@ -97,7 +97,7 @@ goose/
 ├── cmd/goose/              # main entrypoint
 ├── internal/
 │   ├── config/             # config schema + live store (SetProviderOutbounds)
-│   ├── core/               # core interfaces: Outbound, Inbound, Metadata
+│   ├── core/               # core interfaces: Outbound, Inbound, Metadata, PathRecorder
 │   ├── plugin/             # plugin registry + loader (outbound protocols)
 │   ├── provider/           # dynamic provider manager (poll + Watch loop)
 │   ├── inbound/            # http, socks5 listeners + auth + multi-user
@@ -358,6 +358,65 @@ those rows:
   (`dialLayers`) selects every layer up front, so hop *i* CONNECTs toward
   hop *i+1*'s proxy-server address — real multi-hop semantics — and each
   hop's outcome lands in the metrics as a chain row.
+
+## Observed network path
+
+Every persisted record — a request metric row and an HTTP-probe result —
+carries the network path it actually took, as an adjacency list
+(`core.PathGraph`, JSON `path`): nodes are the engine host (`local`), each
+proxy server dialed (`proxy:<outboundID>`, `#n`-suffixed per failover
+attempt; `server:<host:port>` for a server reached with no outbound behind it
+— an `upstream_proxy: direct` route — which carries kind `proxy` and no
+`outboundID`), and the requested destination (`target`); edges are the
+observed legs with their own duration, outcome, and on failure the same
+phase/reason classification the probe records use
+(`internal/router/pathclass.go` bounds a leg's phase to what that leg could
+have reached). Two identities that share one physical address are two
+vertices, not one: only a bare `server:<host:port>` node, which has no
+outbound identity of its own, is upgraded in place when the config later
+names its outbound; folding two outbounds (or two pool attempts) into one
+vertex would publish the loser's failure on the winner.
+
+Observation happens on the dispatch path itself — where the addresses are
+real — not by looking up config at record time (`internal/core/path.go`,
+`core.PathRecorder`):
+
+- `core.Metadata.Path` carries the recorder from the inbound listener
+  through `Router.Dial` / `dialLayers` / `dialOutbound`; the two seams that
+  see no Metadata (`CheckDial` callers, `routeDialer.DialUpstream`) find it
+  on the ctx via `core.WithPathRecorder`.
+- A proxy node's address is adopted from the socket peer of the conn the leg
+  itself produced (`addressSource: socket`) — never from a conn the leg was
+  handed, and never when the leg's own call recorded legs inside it (a nested
+  route's socket belongs to the member that dialed it); the config address
+  only fills in what the socket could not show (`configured`) — a tunnel
+  protocol's dial string (`geph://tunnel`, `tor-circuit`) is never an address,
+  so it is validated before adoption.
+- Where a pool failover loop actually runs — an outbound's `upstream_proxy:
+  pool:` route, or an HTTP probe's `pool:` route — one edge is recorded per
+  attempt: failed members keep their own error and classification, and the
+  winner is the edge that succeeded onward to the target. Dispatching a
+  request through a chain does not fail over (`dialLayers` selects every
+  layer up front and returns on the first hop error), so those rows carry one
+  proxy node per layer and no `attempt`.
+- Honesty bounds: caps (32 nodes / 64 edges / 8 attempts) surface as
+  `partial` / `dropped`; a leg that was not separately timed omits `duration`
+  on the wire (`omitempty`), which means "untimed", never "instantaneous";
+  every engine-recorded leg is `observed: true` — a leg the engine could not
+  bracket is not emitted at all and `partial` says so — while `observed:
+  false` is reserved for a producer outside the engine; `collapsed` marks a
+  chained hop that threw the previous tunnel away and re-dialed from the
+  engine host; a `direct` protocol hop gets no proxy node (there is no
+  server); a reachability-probe row names no target node (its "target" *is*
+  the probed server, already a proxy node); self-loops and unknown node
+  references are dropped, not invented.
+- The recorder seals at `Snapshot()`: the snapshot deep-copies nodes and
+  edges, memoizes the result, and every mutator is a no-op afterwards —
+  including the in-place address adoption an unsealed `AddProxy` would
+  perform — so the pointer a row carries is immutable even though the store
+  marshals rows on its writer goroutine long after dispatch returned; an
+  HTTP probe's result record and its companion metric row share that one
+  sealed snapshot.
 
 ## Exit-IP checks
 
