@@ -575,13 +575,20 @@ func TestManagerStatusView(t *testing.T) {
 		return mgr.Status()
 	}
 
+	// Wait for BOTH providers to settle: each is polled on its own goroutine,
+	// so a condition on only the successful one lets the failing one still be
+	// "starting" when its assertions below run.
 	sts := waitFor(func(sts []ProviderStatus) bool {
+		var okRunning, errErrored bool
 		for _, st := range sts {
-			if st.ID == "sok" && st.State == "running" && st.OutboundCount == 2 {
-				return true
+			switch st.ID {
+			case "sok":
+				okRunning = st.State == "running" && st.OutboundCount == 2
+			case "serr":
+				errErrored = st.State == "error"
 			}
 		}
-		return false
+		return okRunning && errErrored
 	})
 	var okStatus ProviderStatus
 	for _, st := range sts {
