@@ -45,8 +45,11 @@ import (
 )
 
 const (
-	// probeHTTPConcurrency caps parallel HTTP probes per round, so probing
-	// 200 outbounds is a measured sweep rather than a connection storm.
+	// probeHTTPConcurrency caps parallel HTTP probes per round, so sweeping a
+	// whole fleet is a measured walk rather than a connection storm. Each job
+	// gets a goroutine, but only this many hold the semaphore and dial at once;
+	// the rest wait on it, and a round the budget cuts short leaves them
+	// queued rather than issued.
 	probeHTTPConcurrency = 8
 	// defaultProbeTimeout bounds one HTTP probe request when the spec sets
 	// none.
@@ -59,11 +62,20 @@ const (
 	// to assert against, not to download.
 	defaultProbeBodyBytes = 4 << 10
 	maxProbeBodyBytes     = 1 << 20
-	// maxProbeFanout bounds one round's (target × route) request count.
+	// maxProbeFanout bounds one round's (target × route) request count. This
+	// is the cap that actually bounds a round's cost: the result slice is
+	// sized to it, the response carries every row, and the round budget has to
+	// account for it. Raising it raises the memory and response size of one
+	// API call, so it stays where the round budget can still serve it.
 	maxProbeFanout = 512
-	// maxProbeRoutes bounds the spec's route list, so the fan-out check has
-	// something small to reject first.
-	maxProbeRoutes = 128
+	// maxProbeRoutes bounds the spec's route list. It is deliberately far
+	// above maxProbeFanout: naming a whole fleet (or a pool that expands to
+	// one) is a legitimate thing for a caller to write down, and it is the
+	// fan-out — routes × targets — that decides whether the round can run.
+	// Keeping this small instead would reject a 400-outbound selection
+	// against a single target, which is well within the fan-out and the
+	// budget, just because the list is long.
+	maxProbeRoutes = 65535
 	// probeRoundSlack is added to a round's worst-case budget for dial and
 	// scheduling overhead beyond the per-request timeouts.
 	probeRoundSlack = 30 * time.Second
