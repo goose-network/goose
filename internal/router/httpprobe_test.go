@@ -251,6 +251,50 @@ func TestHTTPProbeRejectsUnrunnableSpec(t *testing.T) {
 	assert.Contains(t, err.Error(), "exceeds")
 }
 
+// TestHTTPProbeRouteCapStaysOutOfTheWay pins the relationship between the two
+// caps: maxProbeRoutes is far above maxProbeFanout, so a long route list is
+// judged by the work it asks for, not by its length. A 200-route round against
+// one target is inside both; against three targets the fan-out speaks, and the
+// error it gives is the fan-out's — not the route cap's, which would have
+// rejected the same list outright when it was 128.
+func TestHTTPProbeRouteCapStaysOutOfTheWay(t *testing.T) {
+	routes := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("outbound:o%d", i)
+		}
+		return out
+	}
+
+	t.Run("the fan-out is what rejects a long list", func(t *testing.T) {
+		f := newReachFixture(t, false)
+		ok := probeTarget(t)
+
+		// 200 routes × 3 targets = 600 requests, over maxProbeFanout. The
+		// round is rejected before a single request is issued, so this costs
+		// nothing but the arithmetic.
+		_, err := f.router.RunHTTPProbes(context.Background(), core.HTTPProbeSpec{
+			Targets: []string{ok.URL + "/a", ok.URL + "/b", ok.URL + "/c"},
+			Routes:  routes(200),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "fan-out")
+		assert.NotContains(t, err.Error(), "probe routes exceeds")
+	})
+
+	t.Run("the route cap still bounds the list itself", func(t *testing.T) {
+		f := newReachFixture(t, false)
+		ok := probeTarget(t)
+
+		_, err := f.router.RunHTTPProbes(context.Background(), core.HTTPProbeSpec{
+			Targets: []string{ok.URL},
+			Routes:  routes(maxProbeRoutes + 1),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fmt.Sprintf("%d probe routes exceeds the %d limit", maxProbeRoutes+1, maxProbeRoutes))
+	})
+}
+
 // TestHTTPProbeDedupesTargets verifies a repeated target is probed once, so a
 // pasted list with duplicates does not double the round.
 func TestHTTPProbeDedupesTargets(t *testing.T) {
