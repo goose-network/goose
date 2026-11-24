@@ -642,17 +642,19 @@ func (s *Store) DeleteProvider(id string) bool {
 	return true
 }
 
-// SeedDefaultProvider adds spec as the sole provider of a store that has no
-// providers configured — the fresh-deployment form of SetProvider. It is the
-// mechanism behind the default-provider seeding a plugin declares through the
-// registry (pkg/plugin.RegisterDefaultProvider) and the entrypoint seeds on
-// a boot with no providers; the store itself stays plugin-agnostic. A store
-// that already configures any provider is left alone — an explicit provider
-// list opts out of the default. Returns whether the spec was added.
+// SeedDefaultProvider adds spec when its ID is not already configured,
+// leaving every existing provider untouched. It is the mechanism behind the
+// zero-config default seeding a plugin declares through the registry
+// (pkg/plugin.RegisterDefaultProvider): the entrypoint seeds each declared
+// default whose plugin is not already present, so a fresh deployment gains
+// every zero-config plugin and an existing one gains the newly-linked ones.
+// The store stays plugin-agnostic — the per-plugin opt-out lives in the
+// entrypoint's seeding policy. Idempotent by ID. Returns whether the spec was
+// added.
 func (s *Store) SeedDefaultProvider(spec *ProviderSpec) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.providers) > 0 {
+	if _, exists := s.providers[spec.ID]; exists {
 		return false
 	}
 	s.providers[spec.ID] = spec

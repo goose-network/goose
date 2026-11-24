@@ -48,17 +48,31 @@ directory (loaded on the next start when present) — so API edits survive
 a restart. Provider-managed state (the outbounds and pool membership a
 provider's polls regenerate) is exempt: only operator objects persist.
 
-A fresh deployment — no `-config`, and nothing yet configured through the
-admin API — seeds the **plugin-declared default provider**: the zero-config
-Psiphon plugin declares itself the default, so the engine starts it
-automatically and its tunnels begin filling the `default` pool with no
-configuration at all. The web UI (and `GET /api/providers`) shows the
-provider immediately instead of an empty list. The behavior is generic
-engine code, not Psiphon-specific: a plugin declares itself via
-`plugin.RegisterDefaultProvider`, and the engine seeds whatever was
-declared whenever its config store holds no providers — seeding happens
-once at startup and never overrides an explicit provider list. Run with
+A deployment auto-seeds every **plugin-declared zero-config provider** that
+is not already configured: each zero-config plugin (Psiphon, geph, Tor,
+OpenRung) declares itself via `plugin.RegisterDefaultProvider`, and the
+engine starts them all automatically — retrieving their proxy servers from
+embedded defaults — so they begin filling the `default` pool with no
+configuration at all. The web UI (and `GET /api/providers/status`) shows the
+providers immediately instead of an empty list. The behavior is generic
+engine code, not plugin-specific: the engine seeds every declaration whose
+plugin is not already present in the config store, so a fresh start gains all
+linked zero-config plugins and an existing config gains the newly-linked
+ones. A plugin already configured opts out of its own seed — an explicit spec
+is never overridden. Seeding happens once at startup; run with
 `-e GOOSE_NO_DEFAULT_PROVIDER=1` for a fully manual start.
+
+Auto-seeded providers are **engine-managed, not operator objects**, with two
+consequences worth knowing. First, deleting one through the admin API is not
+durable across a restart: the plugin is then absent from the config, so the
+next start seeds it again. To keep a zero-config plugin out for good, either
+disable all seeding (`GOOSE_NO_DEFAULT_PROVIDER=1`) or keep an explicit spec
+for that plugin (which opts it out of its own seed). Second, a provider owns
+its outbounds by ID (see the persistence note above): the zero-config
+outbounds use the plugin's default ID — `tor`, `geph`, `openrung`, `psiphon` —
+so a static outbound you named identically is taken over by the provider's
+first poll. Give static outbounds distinct IDs, or set the provider's
+`outbound_id`/`prefix` config key, to avoid the collision.
 
 The image sets `GOOSE_API_LISTEN=0.0.0.0:9090` so the published port
 reaches the admin API without any config — without it the engine's

@@ -89,18 +89,24 @@ type ProviderStatus = api.ProviderStatus
 type StatusReporter = api.StatusReporter
 
 // DefaultProvider is re-exported from the api module: a provider plugin's
-// declaration of the zero-config default the engine seeds on a fresh
-// deployment (a config store with no providers). See the api module's docs
-// for the declaration contract.
+// declaration of a zero-config default the engine auto-seeds so the plugin
+// appears and retrieves its servers without operator setup. See the api
+// module's docs for the declaration contract.
 type DefaultProvider = api.DefaultProvider
 
-// RegisterDefaultProvider declares this plugin as the fresh-deployment
-// default provider. Intended for init(); panics when another plugin already
-// declared a default.
+// RegisterDefaultProvider declares this plugin as a zero-config default the
+// engine auto-seeds. Intended for init(); declarations accumulate (one per
+// plugin) and panic on a duplicate provider name.
 func RegisterDefaultProvider(dp DefaultProvider) { api.RegisterDefaultProvider(dp) }
 
-// LookupDefaultProvider returns the declared fresh-deployment default
-// provider, or false when no plugin declared one.
+// LookupDefaultProviders returns every declared zero-config default provider,
+// sorted by provider name. The engine seeds each whose plugin is not already
+// configured.
+func LookupDefaultProviders() []DefaultProvider { return api.LookupDefaultProviders() }
+
+// LookupDefaultProvider returns the first declared default provider, or false
+// when none is declared. Legacy singular accessor; new code uses
+// LookupDefaultProviders.
 func LookupDefaultProvider() (DefaultProvider, bool) { return api.LookupDefaultProvider() }
 
 // Dialer is the minimal dial capability a plugin needs from the engine.

@@ -47,13 +47,13 @@ func main() {
 			log.Fatalf("goose: load config %s: %v", persistPath, err)
 		}
 	}
-	// A fresh deployment (no providers in the loaded config — the docker
-	// image's no-config start) seeds the provider a plugin declared through
-	// the registry, so the engine is routable out of the box. Which plugin
-	// that is lives entirely in the plugin set; goose itself stays generic
+	// Auto-seed every zero-config provider plugin linked into the build that
+	// is not already configured, so the engine is routable — and its admin UI
+	// shows the providers — out of the box without editing goose.json. Which
+	// plugins seed lives entirely in the plugin set; goose stays generic
 	// (GOOSE_NO_DEFAULT_PROVIDER=1 disables seeding).
-	if provider.SeedDefault(store) {
-		log.Printf("goose: no providers configured; seeded the plugin-declared default provider (set GOOSE_NO_DEFAULT_PROVIDER=1 to disable)")
+	if n := provider.SeedDefault(store); n > 0 {
+		log.Printf("goose: seeded %d zero-config default provider(s) (set GOOSE_NO_DEFAULT_PROVIDER=1 to disable)", n)
 	}
 
 	// Write through: persist API edits (and the startup state above) to

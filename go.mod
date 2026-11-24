@@ -3,9 +3,9 @@ module github.com/goose-network/goose
 go 1.26.0
 
 require (
-	github.com/goose-network/goose-plugin-api v0.0.1
+	github.com/goose-network/goose-plugin-api v0.0.2
 	github.com/goose-network/goose-plugin-psiphon v0.0.3
-	github.com/goose-network/tor-go v0.0.9
+	github.com/goose-network/tor-go v0.0.10
 	github.com/stretchr/testify v1.12.1
 	go.etcd.io/bbolt v1.4.0
 	gvisor.dev/gvisor v0.0.0-20260218152508-eed1cebf761e
@@ -264,10 +264,10 @@ require (
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/goose-network/geph5-go v0.0.2
+	github.com/goose-network/geph5-go v0.0.3
 	github.com/goose-network/goose-plugin-mihomo v0.0.1
 	github.com/goose-network/goose-plugin-singbox v0.0.1
-	github.com/goose-network/openrung-go v0.0.1
+	github.com/goose-network/openrung-go v0.0.2
 	github.com/grafov/m3u8 v0.0.0-20171211212457-6ab8f28ed427 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/kamstrup/intmap v0.5.2 // indirect
