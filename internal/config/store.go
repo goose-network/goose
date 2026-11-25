@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	pub "github.com/goose-network/goose/pkg/plugin"
 )
 
 // Engine is the top-level configuration.
@@ -120,6 +122,17 @@ type OutboundSpec struct {
 	// through it, composing with the engine stack: the route's own first
 	// hop dials through the engine's system/gvisor stack.
 	UpstreamProxy string `json:"upstream_proxy"`
+}
+
+// PinOnly reports whether the provider marked this outbound pin-only
+// (pkg/plugin.PinOnlyKey): advertised and resolvable by an explicit reference,
+// but excluded from automatic selection — provider-managed pool membership and
+// the implicit all-outbounds fallback. A pin-only outbound is still built and
+// still resolves as a chain layer or an operator-pool member; only auto-built
+// rotation skips it.
+func (s *OutboundSpec) PinOnly() bool {
+	b, _ := s.Config[pub.PinOnlyKey].(bool)
+	return b
 }
 
 // Pool is a named, ordered set of outbound IDs plus the filters and
@@ -792,7 +805,15 @@ func (s *Store) rebuildProviderPoolLocked(poolID string) {
 			continue
 		}
 		for id := range owned {
-			if _, ok := s.outbounds[id]; !ok {
+			spec, ok := s.outbounds[id]
+			if !ok {
+				continue
+			}
+			// Pin-only outbounds are advertised for explicit pinning, not
+			// auto-selection: keep them out of provider-managed pool rotation.
+			// An operator-built pool that names one explicitly still honors it —
+			// this filter governs only auto-built membership.
+			if spec.PinOnly() {
 				continue
 			}
 			ids = append(ids, id)

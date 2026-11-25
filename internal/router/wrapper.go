@@ -22,6 +22,9 @@ type outboundWrapper struct {
 	id       string
 	protocol string
 	ms       *metrics.Store
+	// pinOnly mirrors the spec's pin-only flag: the outbound resolves for
+	// explicit chain/pool references but is skipped by the implicit fallback.
+	pinOnly bool
 }
 
 func (w *outboundWrapper) ID() string       { return w.id }

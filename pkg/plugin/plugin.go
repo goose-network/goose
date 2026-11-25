@@ -133,6 +133,18 @@ type StackDialer = api.StackDialer
 // use the "_dialer" name for their own fields.
 const StackDialerKey = api.StackDialerKey
 
+// PinOnlyKey is the reserved outbound config-map key a PROVIDER sets (to true)
+// to mark an outbound as pin-only: advertised and resolvable by an explicit
+// reference (a chain layer, an operator-built pool, or a policy's outbound id),
+// but EXCLUDED from automatic selection — provider-managed pool membership and
+// the implicit all-outbounds fallback. This lets a provider expose a stable
+// discovery surface of per-server outbounds for pinning (so a pinned chain never
+// silently loses a hop when a server drops out of the account's tier) without
+// feeding tier-unusable servers into pool/fallback rotation, where they would
+// fail requests with no retry. The engine reads it (config.OutboundSpec.PinOnly);
+// plugins must not use the "pin_only" name for their own fields.
+const PinOnlyKey = "pin_only"
+
 // AsStackDialer extracts the engine-injected stack dialer from a provider
 // config map, or nil when none was injected.
 func AsStackDialer(cfg map[string]any) StackDialer { return api.AsStackDialer(cfg) }

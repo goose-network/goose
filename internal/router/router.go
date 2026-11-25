@@ -164,7 +164,7 @@ func (r *Router) rebuild() {
 			continue // skip broken outbound, keep serving others
 		}
 		// wrap with stats + id
-		r.outbounds[spec.ID] = &outboundWrapper{Outbound: o, id: spec.ID, protocol: spec.Protocol, ms: r.metrics}
+		r.outbounds[spec.ID] = &outboundWrapper{Outbound: o, id: spec.ID, protocol: spec.Protocol, ms: r.metrics, pinOnly: spec.PinOnly()}
 	}
 	// build pools
 	r.pools = map[string]*builtPool{}
@@ -604,9 +604,10 @@ func (r *Router) layerPool(layer core.ChainLayer) []core.Outbound {
 	if ps, ok := layer.Selector.(*poolSelector); ok {
 		return ps.pool
 	}
-	// fallback chain (no explicit pool): use all built outbounds. Sorted by
-	// id so the shared fallback selector's round-robin counter produces a
-	// stable rotation — map iteration order is random per call, which would
+	// fallback chain (no explicit pool): use all auto-selectable built outbounds
+	// (pin-only ones are excluded — they resolve only for explicit references).
+	// Sorted by id so the shared fallback selector's round-robin counter produces
+	// a stable rotation — map iteration order is random per call, which would
 	// scramble which outbound each consecutive pick lands on.
 	all := make([]core.Outbound, 0, len(r.outbounds))
 	ids := make([]string, 0, len(r.outbounds))
@@ -615,7 +616,11 @@ func (r *Router) layerPool(layer core.ChainLayer) []core.Outbound {
 	}
 	slices.Sort(ids)
 	for _, id := range ids {
-		all = append(all, r.outbounds[id])
+		o := r.outbounds[id]
+		if w, ok := o.(*outboundWrapper); ok && w.pinOnly {
+			continue
+		}
+		all = append(all, o)
 	}
 	return all
 }
