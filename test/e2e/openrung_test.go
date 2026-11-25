@@ -78,8 +78,8 @@ func TestE2E_OpenRungProviderRealNetwork(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "create provider: %s", body)
 
-	// 3. Wait for the provider's relay outbounds ("openrung-<relay id>") to
-	//    land in the default pool.
+	// 3. Wait for the provider's relay outbounds (IDs prefixed "openrung-")
+	//    to land in the default pool.
 	require.Eventually(t, func() bool {
 		resp, body = api.do(http.MethodGet, "/api/pools", nil)
 		if resp.StatusCode != http.StatusOK {
