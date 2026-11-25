@@ -840,20 +840,33 @@ type probeRunRequest struct {
 	MaxBodyBytes int `json:"max_body_bytes,omitempty"`
 }
 
-// The synchronous round needs no budget of its own: RunHTTPProbes bounds the
-// round by its worst case (waves × per-request timeout, capped), so a spec's
-// timeout_seconds applies to a manual run exactly as it does to a scheduled
-// one, and a client that hangs up cancels the rest through r.Context().
+// probeRunWait bounds how long POST /api/probes/run waits for a round to finish
+// before answering 202 with the round still running. A small round wants its
+// results in the response, but a round over a whole fleet must not hold an HTTP
+// request open past a front proxy's read timeout. A var so tests can shorten it
+// instead of waiting out the real budget.
+var probeRunWait = 25 * time.Second
+
+// probeRunAccepted is the 202 body of POST /api/probes/run when the round is
+// still running past the wait window. The round runs detached and records each
+// result as it completes, so the caller polls GET /api/probes/results for them.
+type probeRunAccepted struct {
+	// Status is "accepted": the round is still running in the background.
+	Status string `json:"status" example:"accepted"`
+	// Message points the caller at the results view.
+	Message string `json:"message,omitempty"`
+}
 
 // runProbes godoc
 //
 //	@Summary      Run an HTTP reachability probe round now
-//	@Description  Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — "outbound:<id>", "pool:<id>", "chain:<id>", a bare id, or "direct" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Failed results classify the failure: phase names the leg that failed ("dns"/"connect" = local→proxy-server, "proxy" = the proxy's handshake, "tls"/"headers"/"body" = proxy→target) and reason is a stable slug (dns_timeout, connect_refused, proxy_auth, header_timeout, body_timeout, ...); the phase timings routeDial/dns/connect/tls/ttfb show where the time went, and dialAddr/dialVia report the first-hop address and the outbound a pool or chain route picked. Each result also carries "path": the network path the probe actually took as an adjacency list. Node ids are "local" (the engine host), "proxy:<outboundID>" for each proxy server dialed ("proxy:<outboundID>#<n>" for the n-th failover attempt), "server:<host:port>" — kind "proxy", no outboundID — for a server reached with no outbound behind it (an upstream route resolving to direct), and "target" (the destination). A proxy node's address carries its addressSource: "socket" for the peer read off the connection the leg itself produced, "configured" for the address the config claims (a proxy may sit in front of it); a server whose dial failed keeps the configured one. Edges are the observed legs with their own outcome and, on failure, phase and reason. "observed" is true on every leg an engine recorded — false is reserved for a producer outside the engine that synthesizes a path from configuration; "collapsed" marks a chained hop that threw the previous tunnel away and re-dialed from the engine host; a leg that was not separately timed omits "duration" entirely (the key is absent — it never serializes as 0), which is not the same as instantaneous. Graph-level honesty: "partial" means legs may be missing (a plugin dialed where the engine could not see) and "dropped" counts the nodes a cap cut. A direct route's path is a single stack leg local→target; a "pool:" route runs a real failover loop and records one edge per attempt, keeping each failed member's error, with the winner marked by the edge that succeeded onward to the target. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with "probe". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine.
+//	@Description  Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — "outbound:<id>", "pool:<id>", "chain:<id>", a bare id, or "direct" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Failed results classify the failure: phase names the leg that failed ("dns"/"connect" = local→proxy-server, "proxy" = the proxy's handshake, "tls"/"headers"/"body" = proxy→target) and reason is a stable slug (dns_timeout, connect_refused, proxy_auth, header_timeout, body_timeout, ...); the phase timings routeDial/dns/connect/tls/ttfb show where the time went, and dialAddr/dialVia report the first-hop address and the outbound a pool or chain route picked. Each result also carries "path": the network path the probe actually took as an adjacency list. Node ids are "local" (the engine host), "proxy:<outboundID>" for each proxy server dialed ("proxy:<outboundID>#<n>" for the n-th failover attempt), "server:<host:port>" — kind "proxy", no outboundID — for a server reached with no outbound behind it (an upstream route resolving to direct), and "target" (the destination). A proxy node's address carries its addressSource: "socket" for the peer read off the connection the leg itself produced, "configured" for the address the config claims (a proxy may sit in front of it); a server whose dial failed keeps the configured one. Edges are the observed legs with their own outcome and, on failure, phase and reason. "observed" is true on every leg an engine recorded — false is reserved for a producer outside the engine that synthesizes a path from configuration; "collapsed" marks a chained hop that threw the previous tunnel away and re-dialed from the engine host; a leg that was not separately timed omits "duration" entirely (the key is absent — it never serializes as 0), which is not the same as instantaneous. Graph-level honesty: "partial" means legs may be missing (a plugin dialed where the engine could not see) and "dropped" counts the nodes a cap cut. A direct route's path is a single stack leg local→target; a "pool:" route runs a real failover loop and records one edge per attempt, keeping each failed member's error, with the winner marked by the edge that succeeded onward to the target. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with "probe". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine. Answers 200 with the records when the round finishes within 25s, else 202 while it completes in the background (results then appear in GET /api/probes/results); the round runs detached, so a front proxy's read timeout or a client hangup never cancels it mid-flight.
 //	@Tags         probes
 //	@Accept       json
 //	@Produce      json
 //	@Param        spec body probeRunRequest true "The probe round to run"
 //	@Success      200 {array} core.HTTPProbe
+//	@Success      202 {object} probeRunAccepted
 //	@Failure      400 {object} errResponse
 //	@Failure      401 {object} errResponse
 //	@Failure      405 {object} errResponse
@@ -886,18 +899,45 @@ func (s *Server) probesRun(w http.ResponseWriter, r *http.Request) {
 		Timeout:      time.Duration(req.TimeoutSec) * time.Second,
 		MaxBodyBytes: req.MaxBodyBytes,
 	}
-	// An error here is always a spec the round cannot run at all (a non-URL
-	// target, a fan-out beyond the limit, no routes to probe), so it is the
-	// caller's mistake: 400.
-	out, err := s.probes.RunHTTPProbes(r.Context(), spec)
-	if err != nil {
-		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
-		return
+	// Run the round detached from the request: a front proxy's read timeout (or
+	// a client hangup) must not cancel a fleet-sized round mid-flight and drop
+	// the jobs still queued. The round's own budget governs its lifetime; the
+	// handler answers within probeRunWait either way. An error from the runner
+	// is always a spec the round cannot run at all (a non-URL target, a fan-out
+	// beyond the limit, no routes to probe) — validation that runs before any
+	// dial — so it is the caller's mistake: 400, and it arrives well inside the
+	// wait window.
+	type probeRunResult struct {
+		out []core.HTTPProbe
+		err error
 	}
-	if out == nil {
-		out = []core.HTTPProbe{}
+	done := make(chan probeRunResult, 1)
+	go func() {
+		out, err := s.probes.RunHTTPProbes(context.WithoutCancel(r.Context()), spec)
+		done <- probeRunResult{out, err}
+	}()
+	wait := time.NewTimer(probeRunWait)
+	defer wait.Stop()
+	select {
+	case res := <-done:
+		if res.err != nil {
+			writeJSON(w, errResponse{res.err.Error()}, http.StatusBadRequest)
+			return
+		}
+		out := res.out
+		if out == nil {
+			out = []core.HTTPProbe{}
+		}
+		writeJSON(w, out, http.StatusOK)
+	case <-wait.C:
+		writeJSON(w, probeRunAccepted{
+			Status:  "accepted",
+			Message: "probe round still running; results appear in GET /api/probes/results",
+		}, http.StatusAccepted)
+	case <-r.Context().Done():
+		// The client hung up. The round is detached (its context is not the
+		// request's), so it finishes and its records land in the history.
 	}
-	writeJSON(w, out, http.StatusOK)
 }
 
 // listProbeResults godoc

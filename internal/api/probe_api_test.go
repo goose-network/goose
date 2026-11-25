@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,19 +17,49 @@ import (
 
 // fakeProber stands in for the router: it records the spec it was handed and
 // returns canned results, so these tests cover the HTTP surface (decoding,
-// validation, status codes) without dialing anything.
+// validation, status codes) without dialing anything. When block is non-nil the
+// round "runs" until that channel is closed, which is how the
+// accepted-while-running path is tested without a real wait. The handler runs
+// the round in a goroutine, so the fields are mutex-guarded.
 type fakeProber struct {
+	mu    sync.Mutex
 	specs []core.HTTPProbeSpec
 	res   []core.HTTPProbe
 	err   error
+	block chan struct{}
+	// complete, when non-nil, receives the round's return error once it finishes
+	// — how a test observes a detached round outliving the request.
+	complete chan error
 }
 
-func (f *fakeProber) RunHTTPProbes(_ context.Context, spec core.HTTPProbeSpec) ([]core.HTTPProbe, error) {
+func (f *fakeProber) RunHTTPProbes(ctx context.Context, spec core.HTTPProbeSpec) ([]core.HTTPProbe, error) {
+	f.mu.Lock()
 	f.specs = append(f.specs, spec)
-	if f.err != nil {
-		return nil, f.err
+	res, err, block, complete := f.res, f.err, f.block, f.complete
+	f.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
 	}
-	return f.res, nil
+	if err != nil {
+		if complete != nil {
+			complete <- err
+		}
+		return nil, err
+	}
+	if complete != nil {
+		complete <- nil
+	}
+	return res, nil
+}
+
+func (f *fakeProber) snapshot() []core.HTTPProbeSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]core.HTTPProbeSpec(nil), f.specs...)
 }
 
 func newProbeServer(t *testing.T, fp *fakeProber) (*httptest.Server, *metrics.Store) {
@@ -65,8 +96,9 @@ func TestProbesRunReturnsResults(t *testing.T) {
 	// escaped: match the value, not the quoting.
 	assert.Contains(t, string(body), `1.2.3.4`)
 
-	require.Len(t, fp.specs, 1)
-	spec := fp.specs[0]
+	specs := fp.snapshot()
+	require.Len(t, specs, 1)
+	spec := specs[0]
 	assert.Equal(t, []string{"https://example.com/ip"}, spec.Targets)
 	assert.Equal(t, "POST", spec.Method)
 	assert.Equal(t, map[string]string{"X-Token": "t"}, spec.Headers)
@@ -99,6 +131,51 @@ func TestProbesRunReportsUnrunnableSpec(t *testing.T) {
 	code, body := do(t, hs, "POST", "/api/probes/run", "", map[string]any{"targets": []string{"https://example.com"}})
 	require.Equal(t, http.StatusBadRequest, code, string(body))
 	assert.Contains(t, string(body), "deadline exceeded")
+}
+
+// TestProbesRunAcceptsSlowRound asserts a round that outlasts the wait window
+// answers 202 with an accepted body while it keeps running, instead of holding
+// the request open until a front proxy's read timeout cuts it off (the 504).
+func TestProbesRunAcceptsSlowRound(t *testing.T) {
+	restore := probeRunWait
+	probeRunWait = 50 * time.Millisecond
+	t.Cleanup(func() { probeRunWait = restore })
+
+	release := make(chan struct{})
+	fp := &fakeProber{block: release}
+	hs, _ := newProbeServer(t, fp)
+	t.Cleanup(func() { close(release) })
+
+	code, body := do(t, hs, "POST", "/api/probes/run", "", map[string]any{"targets": []string{"https://example.com"}})
+	require.Equal(t, http.StatusAccepted, code, string(body))
+	assert.Contains(t, string(body), `"status":"accepted"`)
+	assert.Len(t, fp.snapshot(), 1, "the round started even though the response did not wait for it")
+}
+
+// TestProbesRunRoundOutlivesRequest asserts the round runs detached from the
+// request: once the handler has answered 202 and the HTTP request is over, the
+// round still completes rather than being canceled by the request's context.
+func TestProbesRunRoundOutlivesRequest(t *testing.T) {
+	restore := probeRunWait
+	probeRunWait = 50 * time.Millisecond
+	t.Cleanup(func() { probeRunWait = restore })
+
+	release := make(chan struct{})
+	fp := &fakeProber{block: release, complete: make(chan error, 1)}
+	hs, _ := newProbeServer(t, fp)
+
+	code, body := do(t, hs, "POST", "/api/probes/run", "", map[string]any{"targets": []string{"https://example.com"}})
+	require.Equal(t, http.StatusAccepted, code, string(body))
+
+	// The request is over. A round tied to r.Context() would be canceled now; a
+	// detached one finishes when its work does.
+	close(release)
+	select {
+	case err := <-fp.complete:
+		assert.NoError(t, err, "the detached round completes, not canceled by the request ending")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the detached round never completed after the request ended")
+	}
 }
 
 // TestProbesRunWithoutRunner asserts the endpoint reports 503 when the engine

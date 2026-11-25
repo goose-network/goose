@@ -1451,7 +1451,7 @@
         },
         "/api/probes/run": {
             "post": {
-                "description": "Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — \"outbound:\u003cid\u003e\", \"pool:\u003cid\u003e\", \"chain:\u003cid\u003e\", a bare id, or \"direct\" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Failed results classify the failure: phase names the leg that failed (\"dns\"/\"connect\" = local→proxy-server, \"proxy\" = the proxy's handshake, \"tls\"/\"headers\"/\"body\" = proxy→target) and reason is a stable slug (dns_timeout, connect_refused, proxy_auth, header_timeout, body_timeout, ...); the phase timings routeDial/dns/connect/tls/ttfb show where the time went, and dialAddr/dialVia report the first-hop address and the outbound a pool or chain route picked. Each result also carries \"path\": the network path the probe actually took as an adjacency list. Node ids are \"local\" (the engine host), \"proxy:\u003coutboundID\u003e\" for each proxy server dialed (\"proxy:\u003coutboundID\u003e#\u003cn\u003e\" for the n-th failover attempt), \"server:\u003chost:port\u003e\" — kind \"proxy\", no outboundID — for a server reached with no outbound behind it (an upstream route resolving to direct), and \"target\" (the destination). A proxy node's address carries its addressSource: \"socket\" for the peer read off the connection the leg itself produced, \"configured\" for the address the config claims (a proxy may sit in front of it); a server whose dial failed keeps the configured one. Edges are the observed legs with their own outcome and, on failure, phase and reason. \"observed\" is true on every leg an engine recorded — false is reserved for a producer outside the engine that synthesizes a path from configuration; \"collapsed\" marks a chained hop that threw the previous tunnel away and re-dialed from the engine host; a leg that was not separately timed omits \"duration\" entirely (the key is absent — it never serializes as 0), which is not the same as instantaneous. Graph-level honesty: \"partial\" means legs may be missing (a plugin dialed where the engine could not see) and \"dropped\" counts the nodes a cap cut. A direct route's path is a single stack leg local→target; a \"pool:\" route runs a real failover loop and records one edge per attempt, keeping each failed member's error, with the winner marked by the edge that succeeded onward to the target. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with \"probe\". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine.",
+                "description": "Issues one HTTP request toward each target through each route and returns every response (status, headers, body, latency), one record per (target, route) pair. A TCP dial probe only proves a proxy server answers; this proves the route actually proxies. Routes take the same reference forms as upstream_proxy and chain layers — \"outbound:\u003cid\u003e\", \"pool:\u003cid\u003e\", \"chain:\u003cid\u003e\", a bare id, or \"direct\" — and an empty list probes every built outbound. Per-request failures are results, not errors: an undialable route is exactly what a probe is for. Failed results classify the failure: phase names the leg that failed (\"dns\"/\"connect\" = local→proxy-server, \"proxy\" = the proxy's handshake, \"tls\"/\"headers\"/\"body\" = proxy→target) and reason is a stable slug (dns_timeout, connect_refused, proxy_auth, header_timeout, body_timeout, ...); the phase timings routeDial/dns/connect/tls/ttfb show where the time went, and dialAddr/dialVia report the first-hop address and the outbound a pool or chain route picked. Each result also carries \"path\": the network path the probe actually took as an adjacency list. Node ids are \"local\" (the engine host), \"proxy:\u003coutboundID\u003e\" for each proxy server dialed (\"proxy:\u003coutboundID\u003e#\u003cn\u003e\" for the n-th failover attempt), \"server:\u003chost:port\u003e\" — kind \"proxy\", no outboundID — for a server reached with no outbound behind it (an upstream route resolving to direct), and \"target\" (the destination). A proxy node's address carries its addressSource: \"socket\" for the peer read off the connection the leg itself produced, \"configured\" for the address the config claims (a proxy may sit in front of it); a server whose dial failed keeps the configured one. Edges are the observed legs with their own outcome and, on failure, phase and reason. \"observed\" is true on every leg an engine recorded — false is reserved for a producer outside the engine that synthesizes a path from configuration; \"collapsed\" marks a chained hop that threw the previous tunnel away and re-dialed from the engine host; a leg that was not separately timed omits \"duration\" entirely (the key is absent — it never serializes as 0), which is not the same as instantaneous. Graph-level honesty: \"partial\" means legs may be missing (a plugin dialed where the engine could not see) and \"dropped\" counts the nodes a cap cut. A direct route's path is a single stack leg local→target; a \"pool:\" route runs a real failover loop and records one edge per attempt, keeping each failed member's error, with the winner marked by the edge that succeeded onward to the target. Each result is also persisted (GET /api/probes/results) and recorded as a metric row whose chain starts with \"probe\". Records are informational only — they never change the reachability verdicts routing filters on, because an HTTP probe can fail for the target's sake while the route is fine. Answers 200 with the records when the round finishes within 25s, else 202 while it completes in the background (results then appear in GET /api/probes/results); the round runs detached, so a front proxy's read timeout or a client hangup never cancels it mid-flight.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1481,6 +1481,12 @@
                             "items": {
                                 "$ref": "#/definitions/core.HTTPProbe"
                             }
+                        }
+                    },
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "$ref": "#/definitions/api.probeRunAccepted"
                         }
                     },
                     "400": {
@@ -1909,6 +1915,20 @@
                     "description": "Status is \"complete\" when the round finished within the wait window —\nchecks then holds its records — or \"accepted\" when it is still running\nand its results will land in GET /api/exit-checks.",
                     "type": "string",
                     "example": "complete"
+                }
+            }
+        },
+        "api.probeRunAccepted": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "description": "Message points the caller at the results view.",
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Status is \"accepted\": the round is still running in the background.",
+                    "type": "string",
+                    "example": "accepted"
                 }
             }
         },
