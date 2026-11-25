@@ -101,11 +101,12 @@ func New(cfg *config.Store) (*Engine, error) {
 	// (unknown plugin, bad config) is logged and skipped, not fatal.
 	//
 	// The router is both sources the provider manager needs: a spec whose
-	// upstream_proxy routes its fetches through an engine outbound/pool gets a
-	// dialer resolved against live config (see internal/router/upstream.go),
-	// and every provider is handed the engine's layer-3/4 stack dialer so
-	// plugins route their own connections through the configured network stack
-	// (Router.StackDialer).
+	// upstream_proxy routes its server-list fetches through an engine
+	// outbound/pool gets a dialer resolved against live config (see
+	// internal/router/upstream.go), and every provider is handed the engine's
+	// layer-3/4 stack dialer so plugins route their own connections through the
+	// configured network stack (Router.StackDialer) — including the data-path
+	// dials of the outbounds they emit, which never ride the provider upstream.
 	e.providers = provider.New(cfg, rtr, rtr)
 	e.api.SetProviderStatusSource(e.providers)
 	if err := e.providers.Start(); err != nil {

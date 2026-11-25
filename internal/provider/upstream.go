@@ -1,5 +1,6 @@
-// upstream_proxy wiring: routing a provider's own URL fetches through an
-// engine-managed proxy instead of the local network.
+// upstream_proxy wiring: routing a provider's proxy-server-list fetches —
+// and only those fetches — through an engine-managed proxy instead of the
+// local network.
 //
 // A ProviderSpec's upstream_proxy field references a specific outbound
 // ("outbound:x" or a bare id), a pool ("pool:x"), a chain ("chain:x"), or an
@@ -8,7 +9,13 @@
 // the router against live config — and injects it into the provider's config
 // map under pkg/plugin.UpstreamDialerKey before instantiation, so
 // URL-fetching providers (subscription, mihomo, singbox, ...) download their
-// subscription/config through the configured route.
+// subscription/config through the configured route. Control-plane
+// connections that are part of fetching the roster (broker auth/RPC,
+// authority directory fetches) may ride it too. The route never carries the
+// data-path dials of the outbounds the provider emits (tunnel, relay, exit
+// dials): those ride the stack dialer below, or dial directly. Routing an
+// individual outbound's server connection is the separate, explicit
+// OutboundSpec.UpstreamProxy feature, resolved by the router per outbound.
 //
 // Resolution of the reference happens at DIAL time, not once at provider
 // start, so pool membership changes, chain edits, and rebuilt outbounds

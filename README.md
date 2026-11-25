@@ -189,11 +189,20 @@ itself restarts it. The resolved dialer is injected into the provider's
 config map for plugins that support routed fetches (the subscription plugin
 does; see `pkg/plugin.UpstreamDialer`).
 
+The route carries **only the fetches** — including the control-plane
+connections that are part of fetching the roster (broker auth/RPC, authority
+directory fetches). The outbounds the provider emits never ride it: their
+tunnel, relay, and exit dials use the engine stack dialer (or dial directly).
+Routing an individual outbound's own server connection through another proxy
+is the separate, explicit outbound-level `upstream_proxy` field.
+
 Note the name collision with the Psiphon plugin's *config-level*
-`upstream_proxy` (a SOCKS URL its tunnels dial through, in the example
-above): that one lives inside the provider's `config` object and is handled
-by the plugin itself. The fetch-routing field described here is a sibling of
-`provider`/`pool_ids` on the spec.
+`upstream_proxy` (a SOCKS URL its server-list fetches dial through, in the
+example above): that one lives inside the provider's `config` object and is
+handled by the plugin itself. Like the spec-level field it is fetch-only —
+it never routes the tunnel dials of the outbounds the provider emits. The
+fetch-routing field described here is a sibling of `provider`/`pool_ids` on
+the spec.
 
 Then route through it:
 
@@ -423,6 +432,11 @@ pool's traffic rides real 3-hop Tor circuits:
   ]
 }
 ```
+
+The config-level `upstream_proxy` is fetch-only: it routes the directory
+fetches (consensus + microdescriptors) through that SOCKS5 proxy, not the
+Tor circuits themselves — the pool's traffic rides the engine stack and the
+3-hop circuits, never the provider's fetch proxy.
 
 First bootstrap fetches a signed consensus + microdescriptors (expect ~a
 minute before the pool fills in). Config keys (`path_len`,

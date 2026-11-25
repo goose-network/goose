@@ -302,10 +302,15 @@ type ProviderSpec struct {
 	Provider string `json:"provider"` // plugin name, e.g. "psiphon"
 	// PoolIDs are the managed pools to populate; empty means the default pool.
 	PoolIDs []string `json:"pool_ids,omitempty"`
-	// UpstreamProxy routes the provider's own URL fetches (subscription
-	// download, server-list fetch, ...) through an engine-managed route
-	// instead of dialing directly from the engine host. Empty (the default)
-	// keeps direct fetches. The reference is one of:
+	// UpstreamProxy routes the provider's proxy-server-list fetches
+	// (subscription download, server-list/roster fetch, and the control-plane
+	// connections that are part of fetching it — broker auth/RPC, directory
+	// fetches) through an engine-managed route instead of dialing directly
+	// from the engine host. Fetches only: the outbounds the provider emits
+	// never inherit this route — their server dials ride the engine stack,
+	// and routing one outbound's server connection through another proxy is
+	// the separate, explicit OutboundSpec.UpstreamProxy field. Empty (the
+	// default) keeps direct fetches. The reference is one of:
 	//
 	//   - "outbound:<id>":  one specific proxy server (a configured outbound);
 	//     a bare id is also accepted — resolved as a pool when a pool with

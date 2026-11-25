@@ -226,12 +226,15 @@ pool named `pool_id`, bumping the config version so the router rebuilds.
 Stale outbounds (present last poll, absent this poll) are removed. On
 `Outbounds` error the existing pool is kept (no drain, no crash).
 
-A provider spec may also set `upstream_proxy`, routing the provider's own
-networking (the subscription download, the server-list fetch, an embedded
-client's tunnel dials, ...) through an engine-managed route instead of the
-engine host's local network. Outbound specs accept the same field: an
-outbound whose own proxy server must itself be reached through another proxy
-names its route there. The forms are:
+A provider spec may also set `upstream_proxy`, routing the provider's
+proxy-server-list fetches — the subscription download, the server-list/roster
+fetch, and the control-plane connections that are part of fetching it
+(broker auth/RPC, authority directory fetches) — through an engine-managed
+route instead of the engine host's local network. Fetches only: the outbounds
+the provider emits never ride the provider route; their tunnel, relay, and
+exit dials use the engine stack dialer. Outbound specs accept the same field
+as a separate, explicit feature: an outbound whose own proxy server must
+itself be reached through another proxy names its route there. The forms are:
 
 - `""` / `"direct"` — no route;
 - `"outbound:<id>"` — one specific proxy server, pinned;
@@ -253,16 +256,25 @@ Together with the always-injected `pkg/plugin.StackDialerKey` dialer (the
 engine's layer-2/3/4 stack — system kernel or gvisor netstack), this is the
 plugin transport contract: **a plugin's own networking rides the engine
 stack, and the upstream proxy it needs comes from a goose route** — never a
-plugin-private raw address where the engine provides a dialer. The
-precedence in every plugin is route > stack > the plugin's own raw upstream
-or the system dialer. Two documented deviations shape real clients: the
-psiphon plugin *keeps* its raw `upstream_proxy` URL for the untunneled
-server-list/upgrade fetches its custom dialer cannot reach (the route owns
-the tunnel dials), and the tor plugin *drops* its raw SOCKS5 address under a
-route, since the route already is the upstream proxy and chaining a second
-hop inside it would double-proxy. QUIC-based outbounds (hysteria, hysteria2,
-tuic) ride neither a stack detour nor a route — their UDP transport cannot
-tunnel through a TCP route — and dial their own sockets.
+plugin-private raw address where the engine provides a dialer. Which
+connections a route carries depends on the spec level:
+
+- **Provider specs — fetches only.** The injected route (and a plugin-config
+  raw `upstream_proxy` URL, e.g. psiphon's SOCKS URL or tor's SOCKS5 address)
+  carries the proxy-server-list fetches and the control-plane connections
+  that are part of them; the precedence for those fetches is route > stack >
+  the plugin's own raw fetch proxy or the system dialer. The outbounds the
+  provider emits dial their servers — tunnel, relay, circuit, exit dials —
+  through the stack dialer, or directly when none was injected; the provider
+  route never carries them.
+- **Outbound specs — the server dial.** An outbound plugin's own connection
+  to its proxy server rides the route when the outbound spec names one
+  (route > stack): the explicit per-outbound feature, independent of any
+  provider's fetch route.
+
+QUIC-based outbounds (hysteria, hysteria2, tuic) ride neither a stack detour
+nor a route — their UDP transport cannot tunnel through a TCP route — and
+dial their own sockets.
 
 When the config store holds no providers at startup, the engine seeds the
 **default provider a plugin declared** through the plugin contract

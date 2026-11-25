@@ -49,16 +49,22 @@ type Provider = api.Provider
 // per dial). The engine injects the dialer into a config map under the
 // reserved "_upstream_dialer" key before instantiating the plugin:
 //
-//   - provider specs: the route a provider's own network rides (URL fetches,
-//     embedded-client tunnel dials, broker connections), so they reach
-//     blocked sources through a working proxy;
+//   - provider specs: the route the provider's proxy-server-list fetches
+//     ride (the subscription download, the server-list/roster fetch, and the
+//     control-plane connections that are part of fetching it — broker
+//     auth/RPC, authority directory fetches), so they reach blocked sources
+//     through a working proxy. Fetches only: the outbounds a provider emits
+//     never ride this route — their tunnel, relay, and exit dials use the
+//     StackDialer, or dial directly when none was injected;
 //   - outbound specs: the route an outbound's own connection to its proxy
-//     server rides.
+//     server rides — the separate, explicitly configured per-outbound
+//     upstream_proxy feature.
 //
-// Plugins type-assert it out with AsUpstreamDialer; an injected route
-// outranks the StackDialer. The key is absent (or the assertion fails) when
-// no upstream proxy is configured — fall back to the StackDialer, or dial
-// directly.
+// Plugins type-assert it out with AsUpstreamDialer; for the connections the
+// route applies to (a provider's fetches, an outbound's server dial) an
+// injected route outranks the StackDialer. The key is absent (or the
+// assertion fails) when no upstream proxy is configured — fall back to the
+// StackDialer, or dial directly.
 //
 // The returned connection is a tunnel to address: the upstream's proxy
 // handshake has already been performed, and the target protocol (TLS, HTTP,
@@ -116,7 +122,9 @@ type Dialer = api.Dialer
 // dial capability (the configured system or gvisor stack). Providers get it
 // injected into their config map under StackDialerKey and type-assert it
 // out with AsStackDialer, so a plugin's own connections reach their
-// servers through the engine's network stack.
+// servers through the engine's network stack — including the data-path
+// dials (tunnel, relay, exit) of the outbounds a provider emits, which never
+// ride the provider's upstream route.
 type StackDialer = api.StackDialer
 
 // StackDialerKey is the reserved provider config-map key the engine uses to
