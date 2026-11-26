@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"github.com/goose-network/goose/internal/exitip"
 	"github.com/goose-network/goose/internal/geo"
 	"github.com/goose-network/goose/internal/inbound"
+	"github.com/goose-network/goose/internal/logfile"
 	"github.com/goose-network/goose/internal/metrics"
 	"github.com/goose-network/goose/internal/provider"
 	"github.com/goose-network/goose/internal/router"
@@ -43,6 +46,7 @@ type Engine struct {
 	api        *api.Server
 	providers  *provider.Manager
 	exitChecks *exitip.Manager
+	logs       *logfile.Manager
 
 	mu        sync.Mutex
 	listeners map[string]*listenerEntry // keyed by inbound id
@@ -54,6 +58,10 @@ type Engine struct {
 	done   chan struct{}
 	once   sync.Once
 	closed bool
+
+	// logPrev is the standard logger's output before New installed the log
+	// manager; Close restores it.
+	logPrev io.Writer
 }
 
 // New constructs and starts the engine from a config store.
@@ -84,6 +92,18 @@ func New(cfg *config.Store) (*Engine, error) {
 		listeners: map[string]*listenerEntry{},
 		done:      make(chan struct{}),
 	}
+
+	// Bounded durable logging: fan the standard logger (the engine and every
+	// linked plugin that logs through it) out to stderr and the configured
+	// rotating file, whose total storage never exceeds the budget. The
+	// previous output is restored on Close so embedded uses (tests) leave
+	// the process logger as they found it.
+	e.logs = logfile.NewManager()
+	logPath, logMaxSize, logMaxTotal := engCfg.Log.Resolve()
+	e.logs.Reconfigure(logPath, logMaxSize, logMaxTotal)
+	e.logPrev = log.Writer()
+	log.SetOutput(e.logs)
+
 	e.api = api.New(cfg, ms)
 	e.exitChecks = exitip.NewManager(ms, rtr)
 	e.exitChecks.Reconfigure(engCfg.ExitChecks)
@@ -110,7 +130,7 @@ func New(cfg *config.Store) (*Engine, error) {
 	e.providers = provider.New(cfg, rtr, rtr)
 	e.api.SetProviderStatusSource(e.providers)
 	if err := e.providers.Start(); err != nil {
-		fmt.Printf("engine: provider start: %v\n", err)
+		log.Printf("engine: provider start: %v", err)
 	}
 
 	// subscribe to config changes for hot reload
@@ -129,8 +149,20 @@ func (e *Engine) watch(ch <-chan uint64) {
 			if !ok {
 				return
 			}
+			// An iteration dequeued just before Close must not resurrect any
+			// subsystem after shutdown: Rebuild can spawn a fresh probe loop
+			// and exitChecks.Reconfigure restarts the scheduler, neither of
+			// which anything would ever stop again.
+			e.mu.Lock()
+			closed := e.closed
+			e.mu.Unlock()
+			if closed {
+				return
+			}
 			e.router.Rebuild()
 			e.exitChecks.Reconfigure(e.cfg.Engine().ExitChecks)
+			logPath, logMaxSize, logMaxTotal := e.cfg.Engine().Log.Resolve()
+			e.logs.Reconfigure(logPath, logMaxSize, logMaxTotal)
 			e.reconcile()
 		case <-e.done:
 			return
@@ -290,6 +322,8 @@ func (e *Engine) Close() error {
 		e.router.Close()
 		_ = e.ms.Close()
 		_ = e.stack.Close()
+		e.logs.Close()
+		log.SetOutput(e.logPrev)
 	})
 	return nil
 }

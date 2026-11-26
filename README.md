@@ -41,6 +41,29 @@ The image is distroless (static, nonroot). With no `-config` argument the
 engine starts with empty defaults and is configured through the admin API.
 State (the metrics bbolt DB) lives in `/data`.
 
+**Logs are bounded**: the engine copies every standard-logger record (the
+engine and all linked plugins that log through Go's standard logger; a
+plugin writing straight to stdout/stderr bypasses the file) to a rotating
+file whose total storage — active file plus retained rotations — never
+exceeds **1 GB**. The file defaults to
+`logs/goose.log` beside the persisted config (`/data/logs/goose.log` in the
+container, so it survives restarts and rides the same volume). Tune it through
+`engine.log` (config file or `PUT /api/engine`, applied live):
+
+```json
+"log": { "file": "/data/logs/goose.log", "max_size_mb": 32, "max_total_mb": 1000 }
+```
+
+`max_size_mb` is the per-file rotation threshold (default 32 MB);
+`max_total_mb` is the total budget (default 1000 MB = 10^9 bytes). Values
+above the 1 GB hard cap are clamped down to it — no configuration can raise
+goose's own log storage above 1 GB. The oldest rotations are deleted first,
+including files left by earlier runs, and the budget is enforced at every
+write. Changing `file` deletes the previous location's logs so they cannot
+accumulate outside the budget. stderr output (console / `docker logs`) is
+unchanged; set `"file": "-"` to disable file logging explicitly (an empty
+`file` re-resolves to the default on the next start).
+
 **Configuration is durable**: every edit made through the admin API is
 written back to the config file the engine was started with — `-config`
 when given, else `GOOSE_PERSIST_PATH`, else `goose.json` in the working

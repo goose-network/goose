@@ -196,40 +196,36 @@ type errResponse struct {
 
 // --- engine ---
 
-// engine godoc
-//
-//	@Summary      Get engine configuration
-//	@Description  Returns the engine-level configuration: network stack selection, admin API settings, metrics DB path and offline geo database settings.
-//	@Tags         engine
-//	@Produce      json
-//	@Success      200 {object} config.Engine
-//	@Failure      401 {object} errResponse
-//	@Router       /api/engine [get]
+// engine dispatches /api/engine by method. The GET and PUT operations are
+// annotated on their own handlers below so swag emits both into the spec.
 func (s *Server) engine(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, s.cfg.Engine(), http.StatusOK)
+		s.getEngine(w, r)
 	case http.MethodPut, http.MethodPost:
-		var e config.Engine
-		if err := readJSON(r, &e); err != nil {
-			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
-			return
-		}
-		if err := validateEngine(e); err != nil {
-			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
-			return
-		}
-		s.cfg.SetEngine(e)
-		writeJSON(w, e, http.StatusOK)
+		s.updateEngine(w, r)
 	default:
 		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
 }
 
+// getEngine godoc
+//
+//	@Summary      Get engine configuration
+//	@Description  Returns the engine-level configuration as stored: network stack selection, admin API settings, metrics DB path, offline geo database settings and durable log settings (rotating file, per-file size and total storage budget). The stored log budget is returned verbatim; the effective total is clamped to a hard cap of 1 GB at apply time.
+//	@Tags         engine
+//	@Produce      json
+//	@Success      200 {object} config.Engine
+//	@Failure      401 {object} errResponse
+//	@Router       /api/engine [get]
+func (s *Server) getEngine(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.cfg.Engine(), http.StatusOK)
+}
+
 // updateEngine godoc
 //
 //	@Summary      Update engine configuration
-//	@Description  Replaces the engine-level configuration (network stack, admin API settings, metrics DB path, geo database). The stack must be one of "system" or "gvisor" (or empty). Changes are applied live: the engine reconciles listeners on the next config version bump.
+//	@Description  Replaces the engine-level configuration (network stack, admin API settings, metrics DB path, geo database, log file settings). The stack must be one of "system" or "gvisor" (or empty). Log settings apply live: the rotating log writer reopens on the next config version bump, and the effective total log budget is clamped to a hard cap of 1000 MB (1 GB) regardless of what is sent. Negative log sizes and a log.file pointing at the metrics database or the persisted config file are rejected with 400. Changes are applied live: the engine reconciles listeners on the next config version bump.
 //	@Tags         engine
 //	@Accept       json
 //	@Produce      json
@@ -238,13 +234,26 @@ func (s *Server) engine(w http.ResponseWriter, r *http.Request) {
 //	@Failure      400 {object} errResponse
 //	@Failure      401 {object} errResponse
 //	@Router       /api/engine [put]
+func (s *Server) updateEngine(w http.ResponseWriter, r *http.Request) {
+	var e config.Engine
+	if err := readJSON(r, &e); err != nil {
+		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
+		return
+	}
+	if err := s.validateEngine(e); err != nil {
+		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
+		return
+	}
+	s.cfg.SetEngine(e)
+	writeJSON(w, e, http.StatusOK)
+}
 
 // validateEngine sanity-checks an engine config before persisting it, so
 // invalid values (e.g. an unknown stack type, an unparseable exit-check cron
 // expression, or a probe target that is not a URL) are rejected at the API
 // with a 400 rather than failing later during reconciliation or silently
 // disabling the scheduler.
-func validateEngine(e config.Engine) error {
+func (s *Server) validateEngine(e config.Engine) error {
 	switch e.Stack {
 	case "", "system", "gvisor":
 	default:
@@ -261,6 +270,31 @@ func validateEngine(e config.Engine) error {
 	if h := e.Probes.HTTP; h != nil && len(h.Targets) > 0 {
 		if _, err := core.ValidProbeTargets(h.Targets); err != nil {
 			return fmt.Errorf("engine: probes.http.targets: %w", err)
+		}
+	}
+	// Log budgets are clamped, not rejected (anything above the 1 GB cap is
+	// silently reduced); a negative size is a typo worth a 400.
+	if e.Log.MaxSizeMB < 0 || e.Log.MaxTotalMB < 0 {
+		return errors.New("engine: log sizes must not be negative")
+	}
+	// A log file pointed at the metrics database (or its sidecars) or at the
+	// persisted config would be appended to and eventually pruned/renamed by
+	// the log writer, corrupting durable state. Protect the LIVE locations
+	// the binary recorded (the engine never reopens the DB on config edits,
+	// so the incoming db field alone is not what needs protecting) as well as
+	// the incoming db, which a restart would open.
+	if f := e.Log.File; f != "" && f != "-" {
+		rt := s.cfg.RuntimePaths()
+		for _, db := range []string{rt.LiveDB, e.DB} {
+			if db == "" {
+				continue
+			}
+			if config.SamePath(f, db) || config.SamePath(f, db+"-wal") || config.SamePath(f, db+"-shm") {
+				return errors.New("engine: log.file must not point at the metrics database")
+			}
+		}
+		if rt.PersistPath != "" && config.SamePath(f, rt.PersistPath) {
+			return errors.New("engine: log.file must not point at the persisted config file")
 		}
 	}
 	return nil

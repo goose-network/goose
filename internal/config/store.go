@@ -8,6 +8,7 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -22,6 +23,14 @@ type Engine struct {
 	API APIConfig `json:"api"`
 	// DB is the metrics database path.
 	DB string `json:"db"`
+	// Log configures durable engine logging: the standard logger's records
+	// (the engine and every linked plugin that logs through it) are copied
+	// to a rotating file whose total storage — active file plus retained
+	// rotations — never exceeds the budget. Zero value keeps stderr-only
+	// logging at the engine level; the goose binary resolves an empty File
+	// to logs/goose.log beside the persisted config so the shipped engine
+	// bounds its own log storage by default.
+	Log LogConfig `json:"log"`
 	// Geo is the offline IP database config.
 	Geo GeoConfig `json:"geo"`
 	// ExitChecks configures scheduled exit-IP checks: the engine dials each
@@ -41,6 +50,109 @@ type APIConfig struct {
 	Listen string `json:"listen"`
 	// Token is the bearer token for admin auth; empty disables auth.
 	Token string `json:"token"`
+}
+
+// Log sizes are expressed in megabytes of 1,000,000 bytes, so the hard cap
+// of 1000 MB is exactly 1 GB (10^9 bytes) — under a GiB as well.
+const (
+	// DefaultLogMaxSizeMB is the per-file rotation threshold (32 MB).
+	DefaultLogMaxSizeMB = 32
+	// DefaultLogMaxTotalMB is the default total log budget (1 GB).
+	DefaultLogMaxTotalMB = 1000
+	// HardLogTotalCapMB is the ceiling on the total log budget: no
+	// configuration may raise goose's own log storage above 1 GB.
+	HardLogTotalCapMB = 1000
+
+	logMB = 1_000_000
+)
+
+// LogConfig configures the engine's rotating log file. The standard logger
+// always keeps writing to stderr (console / container output); when File is
+// set, every record is copied to the file as well, and the writer rotates at
+// MaxSizeMB and prunes the oldest rotations so the active file plus all
+// retained rotations stay within MaxTotalMB — at every write, not just at
+// rotation. Changes apply live through PUT /api/engine; changing File purges
+// the previous location's logs so they cannot orphan outside the budget.
+type LogConfig struct {
+	// File is the active log file path. Empty means no file logging at the
+	// engine level; the goose binary resolves it at startup to
+	// logs/goose.log beside the persisted config. "-" explicitly disables
+	// file logging and survives restarts.
+	File string `json:"file,omitempty"`
+	// MaxSizeMB rotates the active file once it reaches this many MB
+	// (default 32). Clamped to MaxTotalMB.
+	MaxSizeMB int64 `json:"max_size_mb,omitempty"`
+	// MaxTotalMB is the total byte budget across the active file and all
+	// retained rotations (default 1000). Values above the 1 GB hard cap
+	// are clamped down to it; pre-existing files in the log directory left
+	// by earlier runs count toward the budget and are pruned at startup.
+	MaxTotalMB int64 `json:"max_total_mb,omitempty"`
+}
+
+// DefaultLogPath returns the default active log file for a binary run:
+// logs/goose.log beside the persisted config, absolute so a later working
+// directory change cannot silently move it.
+func DefaultLogPath(persistPath string) string {
+	dir := filepath.Dir(persistPath)
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return filepath.Join(dir, "logs", "goose.log")
+}
+
+// SamePath reports whether two file paths refer to the same location:
+// cleaned absolute forms, symlinks resolved where they exist, and — when
+// both targets exist — inode identity, so a hardlink or symlink alias of a
+// protected file (metrics DB, persisted config) cannot slip past a
+// string-only comparison.
+func SamePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	aa, errA := filepath.Abs(a)
+	bb, errB := filepath.Abs(b)
+	if errA == nil && errB == nil && aa == bb {
+		return true
+	}
+	ra, errRA := filepath.EvalSymlinks(a)
+	rb, errRB := filepath.EvalSymlinks(b)
+	if errRA == nil && errRB == nil {
+		if ra == rb {
+			return true
+		}
+		ia, errIA := os.Stat(ra)
+		ib, errIB := os.Stat(rb)
+		if errIA == nil && errIB == nil && os.SameFile(ia, ib) {
+			return true
+		}
+	}
+	return false
+}
+
+// Resolve applies defaults and the hard cap, returning the effective file
+// path ("" when file logging is off) and byte budgets for logfile.NewWriter.
+func (l LogConfig) Resolve() (path string, maxSize, maxTotal int64) {
+	path = l.File
+	if path == "-" {
+		path = ""
+	}
+	sizeMB, totalMB := l.MaxSizeMB, l.MaxTotalMB
+	if sizeMB <= 0 {
+		sizeMB = DefaultLogMaxSizeMB
+	}
+	if totalMB <= 0 {
+		totalMB = DefaultLogMaxTotalMB
+	}
+	if totalMB > HardLogTotalCapMB {
+		totalMB = HardLogTotalCapMB
+	}
+	if sizeMB > totalMB {
+		sizeMB = totalMB
+	}
+	return path, sizeMB * logMB, totalMB * logMB
 }
 
 type GeoConfig struct {
@@ -428,6 +540,36 @@ type Store struct {
 	// changes and reconcile.
 	version uint64
 	subs    []chan uint64
+
+	// runtime records paths the binary alone knows: the persisted config
+	// file and the metrics DB actually opened (the engine never reopens the
+	// DB on config edits, so the live path — not the incoming config field —
+	// is what a log.file collision check must protect). Not persisted.
+	runtime RuntimePaths
+}
+
+// RuntimePaths are the process-known file locations guarded against log.file
+// collisions. Zero values disable the corresponding check (embedded uses).
+type RuntimePaths struct {
+	// PersistPath is the config file the persister writes through.
+	PersistPath string
+	// LiveDB is the metrics database path the engine opened at startup.
+	LiveDB string
+}
+
+// SetRuntimePaths records the binary-known protected locations. It does not
+// bump the config version: nothing about the engine's behavior changes.
+func (s *Store) SetRuntimePaths(p RuntimePaths) {
+	s.mu.Lock()
+	s.runtime = p
+	s.mu.Unlock()
+}
+
+// RuntimePaths returns the recorded protected locations.
+func (s *Store) RuntimePaths() RuntimePaths {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.runtime
 }
 
 // NewStore returns an empty store with sensible defaults.

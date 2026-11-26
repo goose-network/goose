@@ -17,6 +17,8 @@
 qqwry.dat
 zxinc.dat
 psiphon-data/
+logs/
+*.log
 
 # Editor / OS
 .idea/

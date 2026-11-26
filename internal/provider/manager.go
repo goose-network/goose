@@ -25,6 +25,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -100,7 +101,7 @@ func (m *Manager) Start() error {
 
 	for _, spec := range m.cfg.Providers() {
 		if err := m.startOne(ctx, spec); err != nil {
-			fmt.Printf("provider: start %s: %v\n", spec.ID, err)
+			log.Printf("provider: start %s: %v", spec.ID, err)
 		}
 	}
 
@@ -162,7 +163,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 			continue
 		}
 		if err := m.startOneLocked(ctx, w); err != nil {
-			fmt.Printf("provider: start %s: %v\n", id, err)
+			log.Printf("provider: start %s: %v", id, err)
 		}
 	}
 }
@@ -254,7 +255,7 @@ func (m *Manager) run(ctx context.Context, spec *config.ProviderSpec, prov pub.P
 	defer func() {
 		if c, ok := prov.(interface{ Close() error }); ok {
 			if err := c.Close(); err != nil {
-				fmt.Printf("provider: %s Close: %v\n", spec.ID, err)
+				log.Printf("provider: %s Close: %v", spec.ID, err)
 			}
 		}
 	}()
@@ -300,7 +301,7 @@ func (m *Manager) poll(ctx context.Context, spec *config.ProviderSpec, prov pub.
 	if err != nil {
 		// Keep the previous pools; a transient fetch failure shouldn't drain
 		// them. The provider's next refresh will retry.
-		fmt.Printf("provider: %s Outbounds: %v (keeping existing pools)\n", spec.ID, err)
+		log.Printf("provider: %s Outbounds: %v (keeping existing pools)", spec.ID, err)
 		return
 	}
 	specs := make([]*config.OutboundSpec, 0, len(cfgs))

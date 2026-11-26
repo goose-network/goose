@@ -47,6 +47,35 @@ func main() {
 			log.Fatalf("goose: load config %s: %v", persistPath, err)
 		}
 	}
+	// Bound the engine's own log storage by default: an unset log.file
+	// resolves to logs/goose.log beside the persisted config (the /data
+	// volume in containers), so the shipped engine keeps a durable log
+	// capped at 1 GB without any configuration. Resolving before the
+	// persister's first write means the default survives restarts; set
+	// engine.log.file to "-" to opt out explicitly.
+	engCfg := store.Engine()
+	if engCfg.Log.File == "" {
+		engCfg.Log.File = config.DefaultLogPath(persistPath)
+		store.SetEngine(engCfg)
+	}
+	// A hand-edited config bypasses the API's validation, so re-check the
+	// log path here: aimed at the persisted config or the metrics DB it
+	// would append log records into durable state and rotate/rename it out
+	// from under the persister or bbolt. Refuse and stay stderr-only rather
+	// than corrupt state or take the engine down.
+	if f := engCfg.Log.File; f != "" && f != "-" {
+		collision := config.SamePath(f, persistPath) ||
+			config.SamePath(f, engCfg.DB) || config.SamePath(f, engCfg.DB+"-wal") || config.SamePath(f, engCfg.DB+"-shm")
+		if collision {
+			log.Printf("goose: log.file %s collides with durable state; file logging disabled", f)
+			engCfg.Log.File = "-"
+			store.SetEngine(engCfg)
+		}
+	}
+	// Record the binary-known protected locations so PUT /api/engine can
+	// reject log.file collisions with the LIVE metrics DB (never reopened on
+	// config edits) and the persisted config, not just the incoming fields.
+	store.SetRuntimePaths(config.RuntimePaths{PersistPath: persistPath, LiveDB: store.Engine().DB})
 	// Auto-seed every zero-config provider plugin linked into the build that
 	// is not already configured, so the engine is routable — and its admin UI
 	// shows the providers — out of the box without editing goose.json. Which

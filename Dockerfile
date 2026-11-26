@@ -86,4 +86,12 @@ ENV GOOSE_API_LISTEN=0.0.0.0:9090
 # Inbound proxy ports are config-driven — publish them with -p as needed.
 EXPOSE 9090
 
+# The engine bounds its own log storage: every standard-logger record is
+# copied to a rotating file under /data/logs (engine.log config, hard-capped
+# at 1 GB total). The
+# stderr copy that `docker logs` reads is managed by the Docker log driver,
+# which is unbounded by default — cap it too when running the container:
+#   docker run --log-opt max-size=100m --log-opt max-file=9 ...
+# (9 x 100 MB keeps the container's stdout copy under 1 GB as well.)
+
 ENTRYPOINT ["/usr/local/bin/goose"]

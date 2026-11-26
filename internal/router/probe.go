@@ -23,7 +23,7 @@ package router
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"net"
 	"sort"
 	"sync"
@@ -214,7 +214,7 @@ func (r *Router) httpProbeRound(ctx context.Context) {
 		MaxBodyBytes: h.MaxBodyBytes,
 	}
 	if _, err := r.RunHTTPProbes(ctx, spec); err != nil {
-		fmt.Printf("router: scheduled HTTP probe: %v\n", err)
+		log.Printf("router: scheduled HTTP probe: %v", err)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +154,95 @@ func TestEngineAcceptsValidStacks(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("stack %q should yield 200, got %d", stk, code)
 		}
+	}
+}
+
+// TestEngineRejectsNegativeLogSizes asserts a negative log budget is a 400
+// (over-cap values clamp silently, but negatives are typos).
+func TestEngineRejectsNegativeLogSizes(t *testing.T) {
+	hs, _, _ := newAPIServer(t, "")
+	for _, lc := range []config.LogConfig{
+		{File: "x.log", MaxSizeMB: -1},
+		{File: "x.log", MaxTotalMB: -5},
+	} {
+		code, body := do(t, hs, "PUT", "/api/engine", "", config.Engine{Stack: "system", Log: lc})
+		if code != http.StatusBadRequest {
+			t.Fatalf("negative log size should yield 400, got %d body=%s", code, body)
+		}
+	}
+}
+
+// TestEngineRejectsLogOnDatabase asserts the log writer cannot be pointed at
+// the metrics database (or its WAL sidecars): appending and rotation/pruning
+// would corrupt it.
+func TestEngineRejectsLogOnDatabase(t *testing.T) {
+	hs, _, _ := newAPIServer(t, "")
+	for _, f := range []string{"metrics.db", "./metrics.db", "metrics.db-wal", "metrics.db-shm"} {
+		code, body := do(t, hs, "PUT", "/api/engine", "", config.Engine{
+			Stack: "system", DB: "metrics.db", Log: config.LogConfig{File: f},
+		})
+		if code != http.StatusBadRequest {
+			t.Fatalf("log.file %q on the DB should yield 400, got %d body=%s", f, code, body)
+		}
+	}
+	// A distinct path is fine.
+	code, _ := do(t, hs, "PUT", "/api/engine", "", config.Engine{
+		Stack: "system", DB: "metrics.db", Log: config.LogConfig{File: "logs/goose.log"},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("distinct log path should yield 200, got %d", code)
+	}
+}
+
+// TestEngineRejectsLogOnLiveDatabase asserts the collision check protects the
+// DB the engine actually OPENED, not just the incoming db field: the engine
+// never reopens metrics on config edits, so a PUT that renames db while
+// aiming log.file at the live DB must still be rejected.
+func TestEngineRejectsLogOnLiveDatabase(t *testing.T) {
+	hs, cfg, _ := newAPIServer(t, "")
+	cfg.SetRuntimePaths(config.RuntimePaths{LiveDB: "live.db"})
+	code, body := do(t, hs, "PUT", "/api/engine", "", config.Engine{
+		Stack: "system", DB: "renamed.db", Log: config.LogConfig{File: "live.db"},
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("log.file on the live DB should yield 400, got %d body=%s", code, body)
+	}
+}
+
+// TestEngineRejectsLogOnPersistedConfig asserts the log writer cannot be
+// pointed at the config file the persister writes through.
+func TestEngineRejectsLogOnPersistedConfig(t *testing.T) {
+	hs, cfg, _ := newAPIServer(t, "")
+	cfg.SetRuntimePaths(config.RuntimePaths{PersistPath: "/data/goose.json"})
+	for _, f := range []string{"/data/goose.json", "/data/./goose.json"} {
+		code, body := do(t, hs, "PUT", "/api/engine", "", config.Engine{
+			Stack: "system", Log: config.LogConfig{File: f},
+		})
+		if code != http.StatusBadRequest {
+			t.Fatalf("log.file %q on the persisted config should yield 400, got %d body=%s", f, code, body)
+		}
+	}
+}
+
+// TestEngineRejectsLogSymlinkToDatabase asserts a symlink alias of the DB
+// cannot slip past the string-only path comparison.
+func TestEngineRejectsLogSymlinkToDatabase(t *testing.T) {
+	hs, cfg, _ := newAPIServer(t, "")
+	dir := t.TempDir()
+	db := filepath.Join(dir, "metrics.db")
+	if err := os.WriteFile(db, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "innocent.log")
+	if err := os.Symlink(db, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg.SetRuntimePaths(config.RuntimePaths{LiveDB: db})
+	code, body := do(t, hs, "PUT", "/api/engine", "", config.Engine{
+		Stack: "system", DB: db, Log: config.LogConfig{File: link},
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("symlink to the DB should yield 400, got %d body=%s", code, body)
 	}
 }
 

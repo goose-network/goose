@@ -309,7 +309,7 @@
         },
         "/api/engine": {
             "get": {
-                "description": "Returns the engine-level configuration: network stack selection, admin API settings, metrics DB path and offline geo database settings.",
+                "description": "Returns the engine-level configuration as stored: network stack selection, admin API settings, metrics DB path, offline geo database settings and durable log settings (rotating file, per-file size and total storage budget). The stored log budget is returned verbatim; the effective total is clamped to a hard cap of 1 GB at apply time.",
                 "produces": [
                     "application/json"
                 ],
@@ -322,6 +322,50 @@
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/config.Engine"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Replaces the engine-level configuration (network stack, admin API settings, metrics DB path, geo database, log file settings). The stack must be one of \"system\" or \"gvisor\" (or empty). Log settings apply live: the rotating log writer reopens on the next config version bump, and the effective total log budget is clamped to a hard cap of 1000 MB (1 GB) regardless of what is sent. Negative log sizes and a log.file pointing at the metrics database or the persisted config file are rejected with 400. Changes are applied live: the engine reconciles listeners on the next config version bump.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "engine"
+                ],
+                "summary": "Update engine configuration",
+                "parameters": [
+                    {
+                        "description": "Engine configuration",
+                        "name": "engine",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/config.Engine"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.Engine"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
                         }
                     },
                     "401": {
@@ -2032,6 +2076,14 @@
                         }
                     ]
                 },
+                "log": {
+                    "description": "Log configures durable engine logging: the standard logger's records\n(the engine and every linked plugin that logs through it) are copied\nto a rotating file whose total storage — active file plus retained\nrotations — never exceeds the budget. Zero value keeps stderr-only\nlogging at the engine level; the goose binary resolves an empty File\nto logs/goose.log beside the persisted config so the shipped engine\nbounds its own log storage by default.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.LogConfig"
+                        }
+                    ]
+                },
                 "probes": {
                     "description": "Probes configures scheduled reachability probes: the engine dials each\noutbound's proxy server from the local network and records the outcome\nas an outbound metric row (first hop \"local\"), so routing narrows a\npool's first-hop candidates by measured reachability. Zero value\n(disabled) keeps the engine from making any unsolicited probe dials.",
                     "allOf": [
@@ -2194,6 +2246,23 @@
                 "pool_id": {
                     "description": "PoolID references a Pool to route through directly, without needing a\nnamed chain. Ignored when ChainID or OutboundID is set.",
                     "type": "string"
+                }
+            }
+        },
+        "config.LogConfig": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "description": "File is the active log file path. Empty means no file logging at the\nengine level; the goose binary resolves it at startup to\nlogs/goose.log beside the persisted config. \"-\" explicitly disables\nfile logging and survives restarts.",
+                    "type": "string"
+                },
+                "max_size_mb": {
+                    "description": "MaxSizeMB rotates the active file once it reaches this many MB\n(default 32). Clamped to MaxTotalMB.",
+                    "type": "integer"
+                },
+                "max_total_mb": {
+                    "description": "MaxTotalMB is the total byte budget across the active file and all\nretained rotations (default 1000). Values above the 1 GB hard cap\nare clamped down to it; pre-existing files in the log directory left\nby earlier runs count toward the budget and are pruned at startup.",
+                    "type": "integer"
                 }
             }
         },
