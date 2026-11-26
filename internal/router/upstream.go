@@ -3,13 +3,17 @@
 // engine-managed proxies instead of the engine host's local network. Two
 // config surfaces name a route:
 //
-//   - config.ProviderSpec.UpstreamProxy — a provider's proxy-server-list
-//     fetches only (the subscription download, the server-list/roster fetch,
+//   - config.ProviderSpec.UpstreamProxy — by default a provider's
+//     proxy-server-list fetches only (the subscription download, the
+//     server-list/roster fetch,
 //     and the control-plane connections that are part of it). The manager
 //     injects the resolved dialer into the provider's config map; the
-//     outbounds the provider emits never ride it — their data-path dials use
-//     the stack dialer, or the outbound-level route below when one is
-//     explicitly configured.
+//     outbounds the provider emits do not ride it by default — their
+//     data-path dials use the stack dialer, or the outbound-level route
+//     below when one is explicitly configured. The tor provider's opt-in
+//     link_via_upstream key is the exception: it dials its guard link
+//     through this same injected dialer (a completed tunnel), carrying tor
+//     itself over e.g. an openrung pool where direct guard dials are blocked.
 //   - config.OutboundSpec.UpstreamProxy — an outbound's own connection to
 //     its proxy server. The router injects the resolved dialer into the
 //     outbound's config map at build time.

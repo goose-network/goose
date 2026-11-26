@@ -1,6 +1,6 @@
 // upstream_proxy wiring: routing a provider's proxy-server-list fetches —
-// and only those fetches — through an engine-managed proxy instead of the
-// local network.
+// and, by default, only those fetches — through an engine-managed proxy
+// instead of the local network.
 //
 // A ProviderSpec's upstream_proxy field references a specific outbound
 // ("outbound:x" or a bare id), a pool ("pool:x"), a chain ("chain:x"), or an
@@ -11,9 +11,13 @@
 // URL-fetching providers (subscription, mihomo, singbox, ...) download their
 // subscription/config through the configured route. Control-plane
 // connections that are part of fetching the roster (broker auth/RPC,
-// authority directory fetches) may ride it too. The route never carries the
-// data-path dials of the outbounds the provider emits (tunnel, relay, exit
-// dials): those ride the stack dialer below, or dial directly. Routing an
+// authority directory fetches) may ride it too. By default the route never
+// carries the data-path dials of the outbounds the provider emits (tunnel,
+// relay, exit dials): those ride the stack dialer below, or dial directly.
+// The one opt-in exception is the tor provider's link_via_upstream config
+// key, which dials its guard link through the injected route dialer too
+// (a completed tunnel per the DialUpstream contract; tor-go layers TLS +
+// cells on top) — the openrung -> tor data path on censored hosts. Routing an
 // individual outbound's server connection is the separate, explicit
 // OutboundSpec.UpstreamProxy feature, resolved by the router per outbound.
 //
