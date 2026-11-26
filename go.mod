@@ -264,7 +264,7 @@ require (
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/goose-network/geph5-go v0.0.5
+	github.com/goose-network/geph5-go v0.0.6
 	github.com/goose-network/goose-plugin-mihomo v0.0.1
 	github.com/goose-network/goose-plugin-singbox v0.0.1
 	github.com/goose-network/openrung-go v0.0.3
