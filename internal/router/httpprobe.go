@@ -228,43 +228,80 @@ type probeOutcome struct {
 	path *core.PathRecorder
 }
 
+// probeDialFunc dials one connection toward addr through a probe's route. It
+// is the seam between the HTTP request machinery (performProbeAttempt) and
+// whatever establishes the path: a single route's upstream dialer for a probe
+// round, or a pinned multi-hop chain for a full-probe attempt.
+type probeDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
 // probeOneHTTP performs one (target, route) request and records it.
 func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, target, route string, timeout time.Duration, bodyLimit int) core.HTTPProbe {
 	pctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
+	// The dial path is the one dispatch uses: the route's upstream dialer, or
+	// the engine stack for an empty/direct route (probeTransport's old job).
+	d := r.OutboundUpstreamDialer(route)
+	base := r.stack.Dial
+	if d != nil {
+		base = d.DialUpstream
+	}
+	out := r.performProbeAttempt(pctx, spec, target, timeout, bodyLimit, func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// The transport keeps no pooled conn (DisableKeepAlives), so a redirect
+		// hop is a fresh dial from the engine host rather than a continuation of
+		// the path the previous response arrived on.
+		core.PathRecorderFromContext(ctx).NoteLocalDial()
+		return base(ctx, network, addr)
+	})
+	return r.probeResult(spec, target, route, start, out)
+}
+
+// performProbeAttempt issues one HTTP request toward target through dial and
+// returns everything it observed: the response data, the phase trace, and the
+// path recorder the route machinery drew its legs into. It records NOTHING —
+// the caller decides how to persist (probeResult writes a probe row + metric
+// row for a probe round; a full-probe attempt writes only a metric row on
+// success). The recorder is seeded here, before the dial, so a probe that
+// fails before any dial still names what it was reaching for, and every leg
+// the route draws inside dial lands in out.path.
+func (r *Router) performProbeAttempt(ctx context.Context, spec core.HTTPProbeSpec, target string, timeout time.Duration, bodyLimit int, dial probeDialFunc) probeOutcome {
+	start := time.Now()
 	tr := newProbeTrace(start)
-	pctx = withProbeTrace(pctx, tr)
-	// The path recorder is seeded here rather than in Dial, because a probe's
-	// graph is the ROUTE's: every leg is recorded inside the route machinery —
-	// DialUpstream/dialChain/dialPoolSnapshot, which the route dialer reaches
-	// through the ctx carrier below, a direct route's single stack leg included
-	// (dialUpstream's direct branch). probeTransport adds none of its own. The
-	// target node is named up front so a probe that fails before any dial still
-	// says what it was reaching for.
+	ctx = withProbeTrace(ctx, tr)
 	rec := core.NewPathRecorder()
 	rec.SetClassifier(classifyLeg)
 	rec.AddLocal()
 	if host, port := probeTargetHostPort(target); host != "" {
 		rec.AddTarget(host, port)
 	}
-	pctx = core.WithPathRecorder(pctx, rec)
+	ctx = core.WithPathRecorder(ctx, rec)
 
-	req, err := newProbeRequest(pctx, spec, target)
+	req, err := newProbeRequest(ctx, spec, target)
 	if err != nil {
-		return r.probeResult(spec, target, route, start, probeOutcome{
-			err: err, stage: stageRequest, timings: tr.snapshot(), path: rec,
-		})
+		return probeOutcome{err: err, stage: stageRequest, timings: tr.snapshot(), path: rec}
 	}
 
-	client := &http.Client{Transport: r.probeTransport(route, tr), Timeout: timeout}
+	client := &http.Client{Transport: probeTransportFor(dial, tr), Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return r.probeResult(spec, target, route, start, probeOutcome{
-			err: err, stage: stageDo, timings: tr.snapshot(), path: rec,
-		})
+		return probeOutcome{err: err, stage: stageDo, timings: tr.snapshot(), path: rec}
 	}
 	defer resp.Body.Close()
+
+	// A caller-set Accept-Encoding switches the transport's transparent
+	// decode off, which leaves Content-Encoding on the response; decode here
+	// so assertions and the body pane see the body the target actually sent
+	// rather than the compressed bytes. When the transport decoded it, the
+	// header is already gone and this branch does not fire.
+	out := probeOutcome{
+		status: resp.StatusCode, header: resp.Header, timings: tr.snapshot(), path: rec,
+	}
+	// bodyLimit <= 0 means "don't keep the body": a full-probe attempt cares
+	// only that a response arrived, not what it said, so it skips the read (and
+	// the gzip decode) entirely rather than buffering bytes it will discard.
+	if bodyLimit <= 0 {
+		return out
+	}
 
 	// A caller-set Accept-Encoding switches the transport's transparent
 	// decode off, which leaves Content-Encoding on the response; decode here
@@ -275,10 +312,8 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
 		gz, gerr := gzip.NewReader(resp.Body)
 		if gerr != nil {
-			return r.probeResult(spec, target, route, start, probeOutcome{
-				status: resp.StatusCode, header: resp.Header, err: gerr,
-				stage: stageDecode, timings: tr.snapshot(), path: rec,
-			})
+			out.err, out.stage = gerr, stageDecode
+			return out
 		}
 		defer gz.Close()
 		reader = gz
@@ -291,48 +326,33 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 	if truncated {
 		body = string(raw[:bodyLimit])
 	}
-	out := probeOutcome{
-		status: resp.StatusCode, header: resp.Header, body: body,
-		truncated: truncated, err: readErr, timings: tr.snapshot(), path: rec,
-	}
+	out.body, out.truncated, out.err = body, truncated, readErr
 	if readErr != nil {
 		out.stage = stageBody
 	}
-	return r.probeResult(spec, target, route, start, out)
+	return out
 }
 
-// probeTransport builds the transport whose dials ride route: the route
-// dialer, or the engine stack for an empty route (which is also what "direct"
-// resolves to, one layer down). Either way the dial is bracketed for the
-// trace: RouteDial is the one timing every stack and protocol provides, and
-// its error is what attributes a Do failure to the local→proxy leg rather than
-// the proxy→target one.
+// probeTransportFor builds the transport whose dials ride dial, bracketing
+// each for the trace: RouteDial is the one timing every stack and protocol
+// provides, and its error is what attributes a Do failure to the local→proxy
+// leg rather than the proxy→target one.
 //
 // It draws no leg of its own. Every leg of a probe's path — including a direct
-// route's single stack dial — is recorded inside dialUpstream/dialChain/
-// dialPoolSnapshot, which the route dialer reaches through the ctx carrier;
-// bracketing the dial here as well would draw the same legs twice. What the
-// closure does owe the recorder is where this dial leaves FROM: the transport
-// keeps no pooled conn (DisableKeepAlives), so a redirect hop is a fresh dial
-// from the engine host rather than a continuation of the path the previous
-// response arrived on. Without saying so, the recorder would read that dial as
-// a nested route re-reaching the node the last leg arrived at and either
-// suppress the leg or draw it leaving that node.
-func (r *Router) probeTransport(route string, tr *probeTrace) *http.Transport {
-	// An empty route cannot reach here: probeRoutes drops empty references and
-	// RunHTTPProbes rejects a round left with none, so the dialer is always the
-	// route's. The stack fallback keeps a nil dialer from being dereferenced.
-	d := r.OutboundUpstreamDialer(route)
-	base := r.stack.Dial
-	if d != nil {
-		base = d.DialUpstream
-	}
+// route's single stack dial — is recorded inside the route machinery
+// (dialUpstream/dialChain/dialPoolSnapshot, or dialHops for a full-probe
+// attempt), which dial reaches through the ctx carrier; bracketing the dial
+// here as well would draw the same legs twice. What the closure does owe the
+// recorder is where this dial leaves FROM: the transport keeps no pooled conn
+// (DisableKeepAlives), so a redirect hop is a fresh dial from the engine host
+// rather than a continuation of the path the previous response arrived on —
+// the dial func itself calls NoteLocalDial to say so.
+func probeTransportFor(dial probeDialFunc, tr *probeTrace) *http.Transport {
 	return &http.Transport{
 		DisableKeepAlives: true, // one request per route: no pooled conn reuse
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			tr.noteRouteDialStart()
-			core.PathRecorderFromContext(ctx).NoteLocalDial()
-			conn, err := base(ctx, network, addr)
+			conn, err := dial(ctx, network, addr)
 			tr.noteRouteDialEnd(err)
 			return conn, err
 		},

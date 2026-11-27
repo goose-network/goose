@@ -63,6 +63,12 @@ type Router struct {
 	httpProbeInFlight atomic.Bool
 	httpProbeWG       sync.WaitGroup
 
+	// fullProbes holds the live full active probing jobs by ID (fullprobe.go);
+	// fullProbeWG joins their runners on shutdown.
+	fullProbeMu sync.Mutex
+	fullProbes  map[string]*fullProbeRun
+	fullProbeWG sync.WaitGroup
+
 	copyBufPool sync.Pool
 	metricSeq   uint64
 }
@@ -110,10 +116,12 @@ func New(cfg *config.Store, ms *metrics.Store, stk stack.Stack) *Router {
 	return r
 }
 
-// Close stops the router's background probe loop. The router has no other
+// Close stops the router's background probe loop and cancels any running
+// full active probing jobs, joining their runners. The router has no other
 // owned resources; the engine closes it before the stack and metrics store.
 func (r *Router) Close() {
 	r.stopProber()
+	r.stopFullProbes()
 }
 
 // StackDialer returns the engine's configured network-stack dialer — the
@@ -527,6 +535,19 @@ func (r *Router) dialLayers(ctx context.Context, layers []snapshottedLayer, meta
 		hops[i] = out
 	}
 
+	return r.dialHops(ctx, hops, meta)
+}
+
+// dialHops dials a pre-selected, ordered hop list left-to-right: hop i tunnels
+// toward hop i+1's proxy-server address, and only the final hop CONNECTs toward
+// meta's target. It is the dial half of dialLayers, split out so the full-probe
+// runner can dial an explicitly pinned path (no selection, no reachability
+// narrowing — it is measuring whether the path works, not routing traffic).
+// The returned []string is the ordered hop IDs actually dialed.
+//
+// Dials happen outside the router lock, per dialChain's comment.
+func (r *Router) dialHops(ctx context.Context, hops []core.Outbound, meta core.Metadata) (net.Conn, []string, error) {
+	chainIDs := make([]string, 0, len(hops))
 	var conn net.Conn
 	for i, h := range hops {
 		chainIDs = append(chainIDs, h.ID())

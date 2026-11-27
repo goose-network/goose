@@ -1436,6 +1436,171 @@
                 }
             }
         },
+        "/api/probes/full": {
+            "get": {
+                "description": "Returns up to n full-probe job snapshots, newest first: live jobs with their current per-level progress, plus the durable history of finished jobs. Each level carries its depth, planned/finished/success/failed counts, the successful paths (ordered outbound hop lists with latency and status, fastest first) and the failed items aggregated by last-hop outbound.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "probes"
+                ],
+                "summary": "List full active probing jobs",
+                "parameters": [
+                    {
+                        "maximum": 64,
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Number of jobs to return (default 20, max 64)",
+                        "name": "n",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/core.FullProbeJob"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Launches a multi-level sweep that discovers which proxy paths reach the target: level 1 probes local → every outbound (successes A, failures B); level 2 probes local → a → b for every a ∈ A, b ∈ B (successes C, failures D); level 3 extends the surviving paths with the new failures, and so on up to max_depth (5). Every attempt is a real HTTP request through the pinned path, so a success proves the whole chain proxies. The job runs detached; poll GET /api/probes/full/{id} for per-level progress and success paths, then POST /api/probes/full/{id}/inbounds to turn them into chains + inbounds. rps caps the probe request rate (up to 10000); concurrency, max_attempts_per_level, max_paths_per_level (the beam of fastest paths kept per level) and max_total_attempts bound the fan-out.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "probes"
+                ],
+                "summary": "Start a full active probing job",
+                "parameters": [
+                    {
+                        "description": "The sweep to run",
+                        "name": "spec",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.fullProbeRunRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/core.FullProbeJob"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/probes/full/{id}/inbounds": {
+            "post": {
+                "description": "Turns the job's successful paths into chains + inbounds in the live config: one chain per path (its hops as pinned outbound layers) and one inbound listener routed through it. With no body (or no paths given) the fastest successful path per depth is applied — local→A, local→A→C, local→A→C→E, ...; naming paths explicitly applies exactly those (each must be one of the job's successful paths). protocol defaults to socks5, listen_prefix to 127.0.0.1; port names the first port (each further inbound takes the next), and port 0 picks a free port per inbound. Changes apply live: the engine starts the listeners on the next config version bump.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "probes"
+                ],
+                "summary": "Create inbounds from a job's successful paths",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Job id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Which paths to apply and how to name/listen the generated inbounds",
+                        "name": "spec",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/core.FullProbeApplySpec"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/api.fullProbeApplyResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/probes/results": {
             "get": {
                 "description": "Returns up to n recent HTTP probe records, newest first: for each (target, route) pair the response status, headers, body (capped, with truncated set when it was), latency, and time. Failed records also carry phase and reason: phase says which leg failed — \"dns\"/\"connect\" are the local→proxy-server leg, \"proxy\" is the proxy's handshake, \"tls\"/\"headers\"/\"body\" are beyond the proxy toward the target — and reason is a stable slug (dns_timeout, connect_refused, proxy_auth, proxy_timeout, tunnel_unavailable, tls_handshake, tls_cert, header_timeout, body_timeout, reset_eof, ...). dialAddr is the address the first hop actually connected to (the proxy server for a proxy route), dialVia the outbound a pool or chain route picked, and routeDial/dns/connect/tls/ttfb the per-phase timings (zero where a phase was not observable, e.g. under gvisor or a tunnel protocol). Each record also carries \"path\": the observed network path as an adjacency list. Node ids are \"local\" (the engine host), \"proxy:\u003coutboundID\u003e\" for each proxy server dialed (\"proxy:\u003coutboundID\u003e#\u003cn\u003e\" for the n-th failover attempt), \"server:\u003chost:port\u003e\" — kind \"proxy\", no outboundID — for a server reached with no outbound behind it (an upstream route resolving to direct), and \"target\" (the destination). A proxy node's address carries its addressSource: \"socket\" for the peer read off the connection the leg itself produced, \"configured\" for the address the config claims (a proxy may sit in front of it); a server whose dial failed keeps the configured one. Edges are the observed legs with their own outcome and, on failure, phase and reason. \"observed\" is true on every leg an engine recorded — false is reserved for a producer outside the engine that synthesizes a path from configuration; \"collapsed\" marks a chained hop that threw the previous tunnel away and re-dialed from the engine host; a leg that was not separately timed omits \"duration\" entirely (the key is absent — it never serializes as 0), which is not the same as instantaneous. Graph-level honesty: \"partial\" means legs may be missing (a plugin dialed where the engine could not see) and \"dropped\" counts the nodes a cap cut. A \"pool:\" route runs a real failover loop and records one edge per attempt, keeping each failed member's error and classification, with the winner marked by the edge that succeeded onward to the target. The \"path\" key is absent on records an engine that predates path observation recorded. Both manual runs and scheduled rounds land here. Optionally filtered to one route reference.",
@@ -1962,6 +2127,74 @@
                 }
             }
         },
+        "api.fullProbeApplyResponse": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "description": "JobID is the job the paths came from.",
+                    "type": "string"
+                },
+                "results": {
+                    "description": "Results are the generated chain + inbound pairs, one per applied path.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/core.FullProbeApplyResult"
+                    }
+                }
+            }
+        },
+        "api.fullProbeRunRequest": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "description": "Body is the request body, sent verbatim.",
+                    "type": "string"
+                },
+                "concurrency": {
+                    "description": "Concurrency caps in-flight attempts. Default 2×RPS (min 16, max 16384).",
+                    "type": "integer"
+                },
+                "headers": {
+                    "description": "Headers are added to every request.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "max_attempts_per_level": {
+                    "description": "MaxAttemptsPerLevel caps one level's fan-out. Default 10000.",
+                    "type": "integer"
+                },
+                "max_depth": {
+                    "description": "MaxDepth is the deepest chain length to explore (1..5). Default 5.",
+                    "type": "integer"
+                },
+                "max_paths_per_level": {
+                    "description": "MaxPathsPerLevel caps the successful paths kept as next-level prefixes\n(fastest first). Default 256.",
+                    "type": "integer"
+                },
+                "max_total_attempts": {
+                    "description": "MaxTotalAttempts caps the whole job. Default 100000.",
+                    "type": "integer"
+                },
+                "method": {
+                    "description": "Method is the HTTP method; empty means GET.",
+                    "type": "string"
+                },
+                "rps": {
+                    "description": "RPS is the probe request rate limit (1..10000). Default 100.",
+                    "type": "integer"
+                },
+                "target": {
+                    "description": "Target is the absolute http(s) URL every attempt requests. Required.",
+                    "type": "string"
+                },
+                "timeout_seconds": {
+                    "description": "TimeoutSec bounds one attempt. Default 10; capped at 60.",
+                    "type": "integer"
+                }
+            }
+        },
         "api.probeRunAccepted": {
             "type": "object",
             "properties": {
@@ -2435,6 +2668,252 @@
                 }
             }
         },
+        "core.FullProbeApplyResult": {
+            "type": "object",
+            "properties": {
+                "chain_id": {
+                    "type": "string"
+                },
+                "inbound_id": {
+                    "type": "string"
+                },
+                "listen": {
+                    "type": "string"
+                },
+                "path": {
+                    "$ref": "#/definitions/core.FullProbePath"
+                },
+                "protocol": {
+                    "type": "string"
+                }
+            }
+        },
+        "core.FullProbeApplySpec": {
+            "type": "object",
+            "properties": {
+                "id_prefix": {
+                    "description": "IDPrefix names the generated chains and inbounds\n(\"\u003cprefix\u003e-d\u003cdepth\u003e-\u003cn\u003e\"); empty means \"fullprobe-\u003cjobID\u003e\".",
+                    "type": "string"
+                },
+                "listen_prefix": {
+                    "description": "ListenPrefix is the host every generated inbound listens on; empty\nmeans 127.0.0.1.",
+                    "type": "string"
+                },
+                "paths": {
+                    "description": "Paths are the exact hop lists to build, each an ordered list of\noutbound IDs. Empty means BestPaths().",
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "port": {
+                    "description": "Port is the first port to assign; each further inbound takes the next\none. Zero picks a free port per inbound (probed by opening and closing\na socket, so the generated config names a concrete port).",
+                    "type": "integer"
+                },
+                "protocol": {
+                    "description": "Protocol is the inbound listener protocol (\"http\" or \"socks5\"); empty\nmeans \"socks5\".",
+                    "type": "string"
+                }
+            }
+        },
+        "core.FullProbeFailedItem": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "description": "Address is the outbound's server address, when it has one.",
+                    "type": "string"
+                },
+                "count": {
+                    "description": "Count is how many attempts ending in this outbound failed.",
+                    "type": "integer"
+                },
+                "error": {
+                    "description": "Error is the most recent failure's error string (a sample, not all).",
+                    "type": "string"
+                },
+                "id": {
+                    "description": "ID is the outbound that failed as the level's last hop.",
+                    "type": "string"
+                },
+                "reason": {
+                    "description": "Reason is the most recent failure's classified reason slug.",
+                    "type": "string"
+                }
+            }
+        },
+        "core.FullProbeJob": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "description": "Error is why the job ended in state \"error\" (a spec that cannot run,\nno outbounds to probe); empty otherwise.",
+                    "type": "string"
+                },
+                "finishedAt": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "levels": {
+                    "description": "Levels are the completed and in-flight levels, depth ascending.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/core.FullProbeLevel"
+                    }
+                },
+                "spec": {
+                    "$ref": "#/definitions/core.FullProbeSpec"
+                },
+                "startedAt": {
+                    "type": "string"
+                },
+                "state": {
+                    "type": "string"
+                },
+                "total_attempts": {
+                    "description": "TotalAttempts is how many attempts have finished across all levels.",
+                    "type": "integer"
+                }
+            }
+        },
+        "core.FullProbeLevel": {
+            "type": "object",
+            "properties": {
+                "candidates": {
+                    "description": "Candidates is how many distinct outbounds were tried as the last hop.",
+                    "type": "integer"
+                },
+                "depth": {
+                    "description": "Depth is the chain length this level probed (1 = local → outbound).",
+                    "type": "integer"
+                },
+                "done": {
+                    "description": "Done is how many attempts finished (success or failure).",
+                    "type": "integer"
+                },
+                "failed": {
+                    "type": "integer"
+                },
+                "failed_items": {
+                    "description": "FailedItems aggregates the failures by last-hop outbound, sorted by\nID. These are the next level's candidates.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/core.FullProbeFailedItem"
+                    }
+                },
+                "finishedAt": {
+                    "type": "string"
+                },
+                "prefixes": {
+                    "description": "Prefixes is how many successful paths from the previous level were\nextended (1 at depth 1: the empty local prefix).",
+                    "type": "integer"
+                },
+                "skipped": {
+                    "type": "integer"
+                },
+                "startedAt": {
+                    "type": "string"
+                },
+                "success": {
+                    "description": "Success / Failed partition Done.",
+                    "type": "integer"
+                },
+                "success_paths": {
+                    "description": "SuccessPaths are the level's successful paths, fastest first, capped\nat the spec's MaxPathsPerLevel. These are the next level's prefixes\nand what inbound creation builds from.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/core.FullProbePath"
+                    }
+                },
+                "total": {
+                    "description": "Total is the planned attempt count after the fan-out caps; Skipped\ncounts the pairs the caps (or a cancel) cut.",
+                    "type": "integer"
+                }
+            }
+        },
+        "core.FullProbePath": {
+            "type": "object",
+            "properties": {
+                "hops": {
+                    "description": "Hops are the outbound IDs in dial order; the engine host (\"local\") is\nthe implicit first node and the target the implicit last.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "latency": {
+                    "description": "Latency is the successful attempt's whole-request span.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/time.Duration"
+                        }
+                    ]
+                },
+                "status": {
+                    "description": "Status is the HTTP response status the attempt received.",
+                    "type": "integer"
+                }
+            }
+        },
+        "core.FullProbeSpec": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "description": "Body is the request body, sent verbatim.",
+                    "type": "string"
+                },
+                "concurrency": {
+                    "description": "Concurrency caps in-flight attempts. Zero derives it from RPS\n(2×RPS, clamped to 16..FullProbeMaxConcurrency).",
+                    "type": "integer"
+                },
+                "headers": {
+                    "description": "Headers are added to every request.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "max_attempts_per_level": {
+                    "description": "MaxAttemptsPerLevel caps one level's fan-out. Zero uses\nDefaultFullProbeAttemptsPerLevel.",
+                    "type": "integer"
+                },
+                "max_depth": {
+                    "description": "MaxDepth is the deepest chain length to explore (1..FullProbeMaxDepth).\nZero uses DefaultFullProbeDepth.",
+                    "type": "integer"
+                },
+                "max_paths_per_level": {
+                    "description": "MaxPathsPerLevel caps the successful paths kept as next-level prefixes\n(fastest first). Zero uses DefaultFullProbePathsPerLevel.",
+                    "type": "integer"
+                },
+                "max_total_attempts": {
+                    "description": "MaxTotalAttempts caps the whole job. Zero uses\nDefaultFullProbeTotalAttempts.",
+                    "type": "integer"
+                },
+                "method": {
+                    "description": "Method is the HTTP method; empty means GET.",
+                    "type": "string"
+                },
+                "rps": {
+                    "description": "RPS is the probe request rate limit (1..FullProbeMaxRPS). Zero uses\nDefaultFullProbeRPS.",
+                    "type": "integer"
+                },
+                "target": {
+                    "description": "Target is the absolute http(s) URL every attempt requests. Required.",
+                    "type": "string"
+                },
+                "timeout": {
+                    "description": "Timeout bounds one attempt. Zero uses DefaultFullProbeTimeout; capped\nat FullProbeMaxTimeout.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/time.Duration"
+                        }
+                    ]
+                }
+            }
+        },
         "core.HTTPProbe": {
             "type": "object",
             "properties": {
@@ -2444,6 +2923,9 @@
                 },
                 "connect": {
                     "$ref": "#/definitions/time.Duration"
+                },
+                "depth": {
+                    "type": "integer"
                 },
                 "dialAddr": {
                     "description": "DialAddr is the address the first hop actually connected to — the\nproxy server for a proxy route, the target itself for a direct one.\nEmpty when the dial was not observable (a tunnel protocol whose\nserver connections ride a background context, a stack that bypasses\nnet.Dialer, an older row).",
@@ -2457,6 +2939,10 @@
                     "$ref": "#/definitions/time.Duration"
                 },
                 "error": {
+                    "type": "string"
+                },
+                "full_probe_id": {
+                    "description": "FullProbeID links this record to the full active probing job that ran\nit (GET /api/probes/full/{id}); Depth is the chain length the attempt\nprobed (1 = local → one outbound). Both are zero/empty on records from\na plain probe round (RunHTTPProbes), which has no job and probes routes\nrather than pinned depths.",
                     "type": "string"
                 },
                 "headers": {

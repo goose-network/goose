@@ -109,6 +109,7 @@ func New(cfg *config.Store) (*Engine, error) {
 	e.exitChecks.Reconfigure(engCfg.ExitChecks)
 	e.api.SetExitRunner(e.exitChecks)
 	e.api.SetProbeRunner(rtr)
+	e.api.SetFullProbeRunner(rtr)
 
 	// initial reconcile of listeners
 	e.reconcile()

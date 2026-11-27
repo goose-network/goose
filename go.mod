@@ -8,6 +8,8 @@ require (
 	github.com/goose-network/tor-go v0.0.12
 	github.com/stretchr/testify v1.12.1
 	go.etcd.io/bbolt v1.4.0
+	golang.org/x/net v0.61.0
+	golang.org/x/time v0.16.0
 	gvisor.dev/gvisor v0.0.0-20260218152508-eed1cebf761e
 )
 
@@ -317,11 +319,10 @@ require (
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect
 	golang.org/x/mod v0.42.0 // indirect
-	golang.org/x/net v0.61.0
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
-	golang.org/x/time v0.16.0 // indirect
+
 	golang.org/x/tools v0.52.0 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20230325221338-052af4a8072b // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect

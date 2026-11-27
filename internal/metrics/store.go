@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,7 @@ var (
 	bucketOutbounds  = []byte("outbounds")
 	bucketExitChecks = []byte("exitchecks")
 	bucketProbes     = []byte("probes")
+	bucketFullProbes = []byte("fullprobes")
 )
 
 // Store is the metrics store: a bbolt DB for durable per-request records
@@ -41,6 +43,24 @@ type Store struct {
 	done   chan struct{}
 	sendMu sync.RWMutex // guards s.in against close-during-send
 	closed atomic.Bool
+
+	// probeIn / probeDone are the probe-row pipeline: HTTP probe records and
+	// full-probe job snapshots share one batched writer, so a full active
+	// probing sweep issuing thousands of requests per second never pays a
+	// synchronous fsync per row (the request pipeline's lesson, applied to
+	// the probe bucket). probeSendMu / probeClosed guard it against
+	// close-during-send exactly like sendMu / closed.
+	probeIn     chan probeWrite
+	probeDone   chan struct{}
+	probeSendMu sync.RWMutex
+	probeClosed atomic.Bool
+}
+
+// probeWrite is one row for the probe pipeline: exactly one of probe / job
+// is set. Both land in time-ordered buckets the readers scan newest-first.
+type probeWrite struct {
+	probe *core.HTTPProbe
+	job   *core.FullProbeJob
 }
 
 // reachVerdict is one outbound's latest local-reachability measurement.
@@ -62,6 +82,17 @@ type statsWindow struct {
 const (
 	windowSize = 32
 	writeBuf   = 1024
+	// probeWriteBuf buffers probe rows between the sweep and the batched
+	// writer. A full-probe job at the 10000 rps cap with a 500 ms flush
+	// window needs ~5000 slots of headroom; twice that absorbs a slow disk
+	// burst before rows start dropping.
+	probeWriteBuf = 8192
+	// probeBatchSize flushes the probe pipeline once this many rows queue,
+	// mirroring the request pipeline's 64-row batch.
+	probeBatchSize = 64
+	// fullProbeHistory caps how many finished full-probe jobs the bucket
+	// keeps; older ones are pruned when a terminal snapshot lands.
+	fullProbeHistory = 64
 )
 
 // Open opens (or creates) the bbolt DB at path and starts the writer.
@@ -71,7 +102,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("metrics: open %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketRequests, bucketOutbounds, bucketExitChecks, bucketProbes} {
+		for _, b := range [][]byte{bucketRequests, bucketOutbounds, bucketExitChecks, bucketProbes, bucketFullProbes} {
 			if _, e := tx.CreateBucketIfNotExists(b); e != nil {
 				return e
 			}
@@ -83,13 +114,16 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		db:    db,
-		stats: map[string]*statsWindow{},
-		reach: map[string]reachVerdict{},
-		in:    make(chan core.RequestMetric, writeBuf),
-		done:  make(chan struct{}),
+		db:        db,
+		stats:     map[string]*statsWindow{},
+		reach:     map[string]reachVerdict{},
+		in:        make(chan core.RequestMetric, writeBuf),
+		done:      make(chan struct{}),
+		probeIn:   make(chan probeWrite, probeWriteBuf),
+		probeDone: make(chan struct{}),
 	}
 	go s.loop()
+	go s.probeLoop()
 	return s, nil
 }
 
@@ -110,6 +144,15 @@ func (s *Store) Close() error {
 	close(s.in)
 	s.sendMu.Unlock()
 	<-s.done
+	// The probe pipeline is closed second and joined separately: a probe
+	// row enqueued while the request pipeline was draining still lands.
+	s.probeSendMu.Lock()
+	if !s.probeClosed.Load() {
+		s.probeClosed.Store(true)
+		close(s.probeIn)
+	}
+	s.probeSendMu.Unlock()
+	<-s.probeDone
 	return s.db.Close()
 }
 
@@ -349,8 +392,11 @@ func (s *Store) RecentExitChecks(n int, outboundID string) ([]core.ExitCheck, er
 }
 
 // RecordHTTPProbe durably stores one HTTP probe result. Like exit-IP checks,
-// probes run at human cadence, so a synchronous single-key write is
-// appropriate — there is no hot data path to protect.
+// plain probe rounds run at human cadence, so a synchronous single-key write
+// is appropriate — there is no hot data path to protect, and callers (and
+// tests) rely on the row being readable the instant the call returns. The
+// full active probing sweep, which can issue thousands of rows per second,
+// uses RecordHTTPProbeAsync instead.
 func (s *Store) RecordHTTPProbe(p core.HTTPProbe) error {
 	if s.closed.Load() {
 		return errors.New("metrics: store closed")
@@ -363,6 +409,46 @@ func (s *Store) RecordHTTPProbe(p core.HTTPProbe) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketProbes).Put(key, val)
 	})
+}
+
+// RecordHTTPProbeAsync enqueues one HTTP probe result on the batched probe
+// pipeline. It is the full-probe sweep's persistence path: at up to 10000
+// requests/second a synchronous fsync per row would throttle the sweep to the
+// disk's commit rate, so rows are batched like request metrics. Safe to call
+// concurrently with Close (probeSendMu + probeClosed); a row offered after
+// Close, or when the buffer is full, is dropped rather than blocking.
+func (s *Store) RecordHTTPProbeAsync(p core.HTTPProbe) error {
+	return s.enqueueProbe(probeWrite{probe: &p})
+}
+
+// RecordFullProbeJob enqueues a full-probe job snapshot for durable storage.
+// The runner calls it periodically while a job runs and once at completion,
+// so a caller polling GET /api/probes/full/{id} (or reading history after a
+// restart) sees the job's progress and final paths. Snapshots are keyed by
+// job ID, so a later snapshot overwrites the earlier one in place.
+func (s *Store) RecordFullProbeJob(j *core.FullProbeJob) error {
+	if j == nil {
+		return errors.New("metrics: nil full probe job")
+	}
+	return s.enqueueProbe(probeWrite{job: j})
+}
+
+// enqueueProbe offers one probe row to the batched writer without blocking.
+func (s *Store) enqueueProbe(w probeWrite) error {
+	if s.probeClosed.Load() {
+		return errors.New("metrics: store closed")
+	}
+	s.probeSendMu.RLock()
+	defer s.probeSendMu.RUnlock()
+	if s.probeClosed.Load() {
+		return errors.New("metrics: store closed")
+	}
+	select {
+	case s.probeIn <- w:
+		return nil
+	default:
+		return errors.New("metrics: probe write buffer full, dropping record")
+	}
 }
 
 // RecentHTTPProbes returns up to n HTTP probe records, newest first. When
@@ -389,4 +475,140 @@ func (s *Store) RecentHTTPProbes(n int, route string) ([]core.HTTPProbe, error) 
 		return nil
 	})
 	return out, err
+}
+
+// probeLoop drains the probe write channel and batch-inserts into bbolt,
+// mirroring loop() but routing each row to its own bucket: HTTP probe records
+// to bucketProbes under a time-ordered key, full-probe job snapshots to
+// bucketFullProbes keyed by job ID (so a progress snapshot overwrites the
+// previous one in place). A terminal job snapshot triggers history pruning so
+// the bucket cannot grow without bound across many sweeps.
+func (s *Store) probeLoop() {
+	defer close(s.probeDone)
+	batch := make([]probeWrite, 0, probeBatchSize)
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		terminal := false
+		_ = s.db.Batch(func(tx *bolt.Tx) error {
+			pb := tx.Bucket(bucketProbes)
+			fb := tx.Bucket(bucketFullProbes)
+			for _, w := range batch {
+				switch {
+				case w.probe != nil:
+					val, err := json.Marshal(w.probe)
+					if err != nil {
+						continue
+					}
+					key := []byte(fmt.Sprintf("%d-%s", w.probe.StartedAt.UnixNano(), w.probe.ID))
+					_ = pb.Put(key, val)
+				case w.job != nil:
+					val, err := json.Marshal(w.job)
+					if err != nil {
+						continue
+					}
+					_ = fb.Put([]byte(w.job.ID), val)
+					if w.job.State != core.FullProbeRunning {
+						terminal = true
+					}
+				}
+			}
+			if terminal {
+				pruneFullProbeJobs(fb)
+			}
+			return nil
+		})
+		batch = batch[:0]
+	}
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case w, ok := <-s.probeIn:
+			if !ok {
+				flush()
+				return
+			}
+			batch = append(batch, w)
+			if len(batch) >= probeBatchSize {
+				flush()
+			}
+		case <-tick.C:
+			flush()
+		}
+	}
+}
+
+// pruneFullProbeJobs keeps at most fullProbeHistory job snapshots, deleting
+// the oldest by StartedAt. Called inside the write transaction that landed a
+// terminal snapshot, so the cap holds without a separate scan pass. The count
+// comes from the cursor, not Stats().KeyN: Stats walks spilled pages only, so
+// keys staged by this very transaction are invisible to it and the guard
+// would read a stale (often zero) count.
+func pruneFullProbeJobs(fb *bolt.Bucket) {
+	type jobKey struct {
+		id string
+		at time.Time
+	}
+	var all []jobKey
+	_ = fb.ForEach(func(k, v []byte) error {
+		var j core.FullProbeJob
+		if err := json.Unmarshal(v, &j); err == nil {
+			all = append(all, jobKey{id: string(k), at: j.StartedAt})
+		}
+		return nil
+	})
+	if len(all) <= fullProbeHistory {
+		return
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+	for i := 0; i < len(all)-fullProbeHistory; i++ {
+		_ = fb.Delete([]byte(all[i].id))
+	}
+}
+
+// FullProbeJob returns the persisted snapshot of one full-probe job by ID.
+// The runner serves live jobs from memory; this is the durable fallback for a
+// job that has finished (or an engine that restarted mid-history).
+func (s *Store) FullProbeJob(id string) (*core.FullProbeJob, bool) {
+	var out *core.FullProbeJob
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bucketFullProbes).Get([]byte(id))
+		if v == nil {
+			return nil
+		}
+		var j core.FullProbeJob
+		if err := json.Unmarshal(v, &j); err == nil {
+			out = &j
+		}
+		return nil
+	})
+	return out, out != nil
+}
+
+// RecentFullProbeJobs returns up to n persisted full-probe job snapshots,
+// newest first by StartedAt.
+func (s *Store) RecentFullProbeJobs(n int) ([]*core.FullProbeJob, error) {
+	if n < 1 {
+		n = 1
+	}
+	var all []*core.FullProbeJob
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketFullProbes).ForEach(func(k, v []byte) error {
+			var j core.FullProbeJob
+			if err := json.Unmarshal(v, &j); err == nil {
+				all = append(all, &j)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].StartedAt.After(all[j].StartedAt) })
+	if len(all) > n {
+		all = all[:n]
+	}
+	return all, nil
 }

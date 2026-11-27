@@ -341,4 +341,12 @@ type HTTPProbe struct {
 
 	Latency   time.Duration `json:"latency"`
 	StartedAt time.Time     `json:"startedAt"`
+
+	// FullProbeID links this record to the full active probing job that ran
+	// it (GET /api/probes/full/{id}); Depth is the chain length the attempt
+	// probed (1 = local → one outbound). Both are zero/empty on records from
+	// a plain probe round (RunHTTPProbes), which has no job and probes routes
+	// rather than pinned depths.
+	FullProbeID string `json:"full_probe_id,omitempty"`
+	Depth       int    `json:"depth,omitempty"`
 }

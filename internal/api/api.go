@@ -82,6 +82,7 @@ type Server struct {
 	mux    *http.ServeMux
 	checks exitRunner
 	probes probeRunner
+	full   fullProbeRunner
 	pstats providerStatusSource
 }
 
@@ -131,6 +132,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/exit-checks/run", s.exitChecksRun)
 	s.mux.HandleFunc("/api/probes/run", s.probesRun)
 	s.mux.HandleFunc("/api/probes/results", s.probeResults)
+	s.mux.HandleFunc("/api/probes/full", s.fullProbes)
+	s.mux.HandleFunc("/api/probes/full/", s.fullProbeItem)
 }
 
 // Auth wraps the handler with bearer-token auth if a token is configured.
