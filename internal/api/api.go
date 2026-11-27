@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goose-network/goose/internal/config"
@@ -84,6 +85,22 @@ type Server struct {
 	probes probeRunner
 	full   fullProbeRunner
 	pstats providerStatusSource
+
+	// writeMu serializes validate+commit across every config-writing
+	// handler. The store locks each getter/setter individually, so the
+	// cross-resource guards (chain-layer vs path-pool, hop existence, id
+	// collisions) are check-then-write: without this mutex a concurrent
+	// write landing between a guard's scan and its commit defeats the
+	// write-time guarantee and leaves state rebuild must skip wholesale.
+	// Admin writes are rare, so one coarse mutex is cheap; reads stay
+	// unlocked. readJSON runs OUTSIDE the lock — a client dribbling a small
+	// body would otherwise hold the mutex indefinitely (MaxBytesReader
+	// bounds size, not time), stalling every other config write; the
+	// server's ReadTimeout bounds that read instead. The lock spans
+	// validate+commit only, and still spans them entirely. Each branch
+	// defers Unlock; in a switch case the defer runs at handler exit,
+	// immediately after the branch.
+	writeMu sync.Mutex
 }
 
 // New builds an API server bound to the config store and metrics store.
@@ -165,10 +182,41 @@ func writeJSON(w http.ResponseWriter, v any, code int) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeListJSON writes a large read: the history GETs (metrics, probe
+// records, exit checks, full-probe results), the full-probe job snapshot and
+// job list, the config collection GETs (inbounds/outbounds/pools/chains/
+// providers — provider fleets grow those without a row cap), and the
+// trigger endpoints' 200-complete responses (a probe round's records carry
+// up to 1MiB of response body each; an exit-check round's records are
+// uncapped by fleet size). Unlike the config writes and the triggers'
+// 202/error responses, whose response is small and whose work is bounded,
+// these bodies are bounded only by n × row-size: tens of MB is normal, and
+// on a slow remote admin link it can take minutes to transfer. The server's
+// flat WriteTimeout (engine.StartAPI) is armed at header-read end and covers
+// the WHOLE response write, so it would sever a legitimate large read
+// mid-body — truncated JSON, a UI error — even though the client is reading
+// steadily. Push the write deadline out for these reads: a non-reading
+// client is still bounded (the transfer stalls and the extended deadline
+// eventually fires), but a steady reader gets the whole payload. The auth
+// middleware passes the concrete ResponseWriter through unwrapped, so
+// http.NewResponseController reaches the connection; on a writer that does
+// not support deadlines the error is ignored and the flat timeout stands
+// (still correct, just less generous). The config-write branches keep the
+// flat WriteTimeout — that bound is what stops a non-reading client from
+// pinning writeMu, and their responses are small.
+func writeListJSON(w http.ResponseWriter, v any) {
+	const listWriteTimeout = 10 * time.Minute
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(listWriteTimeout))
+	writeJSON(w, v, http.StatusOK)
+}
+
 func readJSON(r *http.Request, v any) error {
 	// Limit the body size to prevent memory-exhaustion DoS against the
 	// admin API. http.MaxBytesReader also arranges for the server to close
-	// the connection on overflow, stopping a slow-loris-style sender.
+	// the connection on overflow. It bounds SIZE, not time: a client
+	// dribbling a body that stays under maxBodyBytes blocks in Decode until
+	// the server's ReadTimeout fires (see engine.StartAPI) — callers must
+	// not hold writeMu across this read.
 	r.Body = http.MaxBytesReader(nil, r.Body, maxBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -243,6 +291,8 @@ func (s *Server) updateEngine(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 		return
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if err := s.validateEngine(e); err != nil {
 		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 		return
@@ -355,7 +405,7 @@ func (s *Server) inbounds(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/inbounds")
 	switch {
 	case r.Method == http.MethodGet && id == "":
-		writeJSON(w, s.cfg.Inbounds(), http.StatusOK)
+		writeListJSON(w, s.cfg.Inbounds())
 	case r.Method == http.MethodGet:
 		if in, ok := s.cfg.Inbound(id); ok {
 			writeJSON(w, in, http.StatusOK)
@@ -368,6 +418,8 @@ func (s *Server) inbounds(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if id != "" {
 			// Item path: the URL identifies the resource; the body id (if
 			// any) must match. This prevents POST /api/inbounds/foo from
@@ -385,6 +437,8 @@ func (s *Server) inbounds(w http.ResponseWriter, r *http.Request) {
 		s.cfg.SetInbound(&in)
 		writeJSON(w, in, http.StatusCreated)
 	case r.Method == http.MethodDelete && id != "":
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if s.cfg.DeleteInbound(id) {
 			w.WriteHeader(http.StatusNoContent)
 		} else {
@@ -447,7 +501,7 @@ func (s *Server) outbounds(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/outbounds")
 	switch {
 	case r.Method == http.MethodGet && id == "":
-		writeJSON(w, s.cfg.Outbounds(), http.StatusOK)
+		writeListJSON(w, s.cfg.Outbounds())
 	case r.Method == http.MethodGet:
 		if o, ok := s.cfg.Outbound(id); ok {
 			writeJSON(w, o, http.StatusOK)
@@ -460,6 +514,8 @@ func (s *Server) outbounds(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if id != "" {
 			if o.ID != "" && o.ID != id {
 				writeJSON(w, errResponse{"id in body does not match URL"}, http.StatusBadRequest)
@@ -474,6 +530,8 @@ func (s *Server) outbounds(w http.ResponseWriter, r *http.Request) {
 		s.cfg.SetOutbound(&o)
 		writeJSON(w, o, http.StatusCreated)
 	case r.Method == http.MethodDelete && id != "":
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if s.cfg.DeleteOutbound(id) {
 			w.WriteHeader(http.StatusNoContent)
 		} else {
@@ -532,7 +590,7 @@ func (s *Server) providerStatus(w http.ResponseWriter, r *http.Request) {
 // createPool godoc
 //
 //	@Summary      Create or replace a pool
-//	@Description  Creates (or replaces) a pool: an ordered set of outbound ids plus the filters and selection strategy applied when picking from it.
+//	@Description  Creates (or replaces) a pool: an ordered set of outbound ids plus the filters and selection strategy applied when picking from it. chain_ids adds whole chains as members (selected as one unit, dialed as their pinned hops); every named chain must exist and consist solely of outbound layers that exist and are not shadowed by a pool of the same name (including the pool being written — a member layer naming the pool itself would self-shadow), and member ids must be distinct across outbound_ids and chain_ids. A pool with chain members may not be referenced as a chain layer: the write is refused if an existing chain already references the pool id as a layer (plain pools without chain members remain legal chain layers).
 //	@Tags         pools
 //	@Accept       json
 //	@Produce      json
@@ -557,7 +615,7 @@ func (s *Server) pools(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/pools")
 	switch {
 	case r.Method == http.MethodGet && id == "":
-		writeJSON(w, s.cfg.Pools(), http.StatusOK)
+		writeListJSON(w, s.cfg.Pools())
 	case r.Method == http.MethodGet:
 		if p, ok := s.cfg.Pool(id); ok {
 			writeJSON(w, p, http.StatusOK)
@@ -570,6 +628,8 @@ func (s *Server) pools(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if id != "" {
 			if p.ID != "" && p.ID != id {
 				writeJSON(w, errResponse{"id in body does not match URL"}, http.StatusBadRequest)
@@ -581,9 +641,15 @@ func (s *Server) pools(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, errResponse{"missing id"}, http.StatusBadRequest)
 			return
 		}
+		if err := s.validatePoolMembers(&p); err != nil {
+			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
+			return
+		}
 		s.cfg.SetPool(&p)
 		writeJSON(w, p, http.StatusCreated)
 	case r.Method == http.MethodDelete && id != "":
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if s.cfg.DeletePool(id) {
 			w.WriteHeader(http.StatusNoContent)
 		} else {
@@ -592,6 +658,81 @@ func (s *Server) pools(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, errResponse{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
+}
+
+// validatePoolMembers enforces the chain-member rules on a pool write: member
+// IDs are distinct across outbound_ids and chain_ids, and every chain member
+// names an existing chain whose layers are ALL pinned outbounds that exist
+// and are not pool-shadowed — exactly the shape the router can expand at
+// selection time (expansion depth stays 1; a member with a pool layer would
+// nest selection). The pool's own ID may not appear as a member layer (the
+// write itself would create the shadow), and no existing chain may already
+// reference the pool as a layer (the write would turn that chain's layer into
+// a path-pool traversal, which rebuild skips wholesale).
+func (s *Server) validatePoolMembers(p *config.Pool) error {
+	if len(p.ChainIDs) == 0 {
+		// Plain pools keep their pre-existing acceptance: no member checks,
+		// and plain pools ARE legal chain layers, so no reverse scan either.
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, id := range p.OutboundIDs {
+		if seen[id] {
+			return fmt.Errorf("duplicate pool member id %q", id)
+		}
+		seen[id] = true
+	}
+	for _, id := range p.ChainIDs {
+		if seen[id] {
+			return fmt.Errorf("duplicate pool member id %q", id)
+		}
+		seen[id] = true
+		ch, ok := s.cfg.Chain(id)
+		if !ok || len(ch.Layers) == 0 {
+			return fmt.Errorf("chain member %q: no such chain (or it is empty)", id)
+		}
+		for _, ref := range ch.Layers {
+			// Self-shadow: routing resolves pools before outbounds, so a
+			// member layer named like the pool itself would resolve to the
+			// pool (nested selection) once this write lands — and rebuild
+			// would drop the member. Check before the generic pool lookup so
+			// a replace write reports the self-reference, not "is a pool".
+			if ref == p.ID {
+				return fmt.Errorf("chain member %q: layer %q is the pool itself; routing would resolve the pool and shadow the member hop — rename the pool or the hop", id, ref)
+			}
+			if _, ok := s.cfg.Pool(ref); ok {
+				return fmt.Errorf("chain member %q: layer %q is a pool; member chains must consist solely of pinned outbound layers", id, ref)
+			}
+			if _, ok := s.cfg.Outbound(ref); !ok {
+				return fmt.Errorf("chain member %q: layer %q is not an existing outbound", id, ref)
+			}
+		}
+	}
+	// Reverse reference scan: the chains-write guard only fires on chain
+	// writes, so converting an already-referenced PLAIN pool into a path-pool
+	// would otherwise slip through ordering (pool write after chain write).
+	// Rebuild skips any chain traversing a path-pool whole — resolveRoute
+	// goes nil and live traffic silently falls back — so refuse the write.
+	if ref, ok := s.chainLayerReferencer(p.ID); ok {
+		return fmt.Errorf("pool %q is referenced as a layer by chain %q; a pool with chain members cannot be a chain layer — remove that reference first", p.ID, ref)
+	}
+	return nil
+}
+
+// chainLayerReferencer reports the first existing chain that references id as
+// a layer, if any. Shared by the pools write guard and the pool-mode apply so
+// both directions of the "no chain layer may traverse a path-pool" rule are
+// enforced at write time, before the router's rebuild backstop has to skip a
+// live chain.
+func (s *Server) chainLayerReferencer(id string) (string, bool) {
+	for _, ch := range s.cfg.Chains() {
+		for _, ref := range ch.Layers {
+			if ref == id {
+				return ch.ID, true
+			}
+		}
+	}
+	return "", false
 }
 
 // --- chains ---
@@ -621,7 +762,7 @@ func (s *Server) pools(w http.ResponseWriter, r *http.Request) {
 // createChain godoc
 //
 //	@Summary      Create or replace a chain
-//	@Description  Creates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector) or a single outbound server (pinned for that hop; when an id matches both, the pool wins). Layer 0 is the first hop; each subsequent layer is dialed through the previous.
+//	@Description  Creates (or replaces) a proxy chain: an ordered list of layers, each referencing a pool (which carries its own filters + selector) or a single outbound server (pinned for that hop; when an id matches both, the pool wins). Layer 0 is the first hop; each subsequent layer is dialed through the previous. A layer may not reference a pool that has chain members (path-pool).
 //	@Tags         chains
 //	@Accept       json
 //	@Produce      json
@@ -646,7 +787,7 @@ func (s *Server) chains(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/chains")
 	switch {
 	case r.Method == http.MethodGet && id == "":
-		writeJSON(w, s.cfg.Chains(), http.StatusOK)
+		writeListJSON(w, s.cfg.Chains())
 	case r.Method == http.MethodGet:
 		if c, ok := s.cfg.Chain(id); ok {
 			writeJSON(w, c, http.StatusOK)
@@ -659,6 +800,8 @@ func (s *Server) chains(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if id != "" {
 			if c.ID != "" && c.ID != id {
 				writeJSON(w, errResponse{"id in body does not match URL"}, http.StatusBadRequest)
@@ -670,9 +813,21 @@ func (s *Server) chains(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, errResponse{"missing id"}, http.StatusBadRequest)
 			return
 		}
+		// A chain layer may not reference a path-pool (a pool with chain
+		// members): member chains expand at selection time, and a chain
+		// traversing one would nest that expansion. The router's rebuild
+		// backstop skips such chains wholesale; refuse the write instead.
+		for _, ref := range c.Layers {
+			if p, ok := s.cfg.Pool(ref); ok && len(p.ChainIDs) > 0 {
+				writeJSON(w, errResponse{fmt.Sprintf("layer %q is a pool with chain members; chains may not traverse path-pools", ref)}, http.StatusBadRequest)
+				return
+			}
+		}
 		s.cfg.SetChain(&c)
 		writeJSON(w, c, http.StatusCreated)
 	case r.Method == http.MethodDelete && id != "":
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if s.cfg.DeleteChain(id) {
 			w.WriteHeader(http.StatusNoContent)
 		} else {
@@ -722,7 +877,7 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, errResponse{err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, rec, http.StatusOK)
+	writeListJSON(w, rec)
 }
 
 // maxMetricsRows caps the number of metric rows a single API call can return.
@@ -762,7 +917,7 @@ func (s *Server) exitChecks(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, errResponse{err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, rec, http.StatusOK)
+	writeListJSON(w, rec)
 }
 
 // exitRunWait bounds how long POST /api/exit-checks/run waits for a round to
@@ -818,7 +973,13 @@ func (s *Server) exitChecksRun(w http.ResponseWriter, r *http.Request) {
 	defer wait.Stop()
 	select {
 	case res := <-results:
-		writeJSON(w, exitRunResponse{Status: "complete", Checks: res.Checks}, http.StatusOK)
+		// A complete round's records are uncapped by fleet size (one row per
+		// address-bearing outbound, each asked one round-robin site) — the
+		// same n × row-size class as GET /api/exit-checks, and the wait
+		// window above has already spent part of the flat write budget. The
+		// response is the round's history, so it gets the extended write
+		// deadline; no writeMu is held here.
+		writeListJSON(w, exitRunResponse{Status: "complete", Checks: res.Checks})
 	case <-wait.C:
 		writeJSON(w, exitRunResponse{
 			Status:  "accepted",
@@ -965,7 +1126,14 @@ func (s *Server) probesRun(w http.ResponseWriter, r *http.Request) {
 		if out == nil {
 			out = []core.HTTPProbe{}
 		}
-		writeJSON(w, out, http.StatusOK)
+		// A complete round's records are the same rows GET /api/probes/results
+		// serves — up to maxProbeFanout rows, each carrying up to 1MiB of
+		// response body — and the wait window above has already spent part of
+		// the flat write budget. The response is the round's history, so it
+		// gets the extended write deadline; no writeMu is held here. The 202
+		// branch below and the error branches above stay on writeJSON and
+		// the flat bound.
+		writeListJSON(w, out)
 	case <-wait.C:
 		writeJSON(w, probeRunAccepted{
 			Status:  "accepted",
@@ -1009,7 +1177,7 @@ func (s *Server) probeResults(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, errResponse{err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, rec, http.StatusOK)
+	writeListJSON(w, rec)
 }
 
 func parseInt(s string) (int, error) {
@@ -1090,7 +1258,7 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/providers")
 	switch {
 	case r.Method == http.MethodGet && id == "":
-		writeJSON(w, s.cfg.Providers(), http.StatusOK)
+		writeListJSON(w, s.cfg.Providers())
 	case r.Method == http.MethodGet:
 		if p, ok := s.cfg.Provider(id); ok {
 			writeJSON(w, p, http.StatusOK)
@@ -1103,6 +1271,8 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 			return
 		}
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if id != "" {
 			if p.ID != "" && p.ID != id {
 				writeJSON(w, errResponse{"id in body does not match URL"}, http.StatusBadRequest)
@@ -1124,6 +1294,8 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 		s.cfg.SetProvider(&p)
 		writeJSON(w, p, http.StatusCreated)
 	case r.Method == http.MethodDelete && id != "":
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if s.cfg.DeleteProvider(id) {
 			w.WriteHeader(http.StatusNoContent)
 		} else {

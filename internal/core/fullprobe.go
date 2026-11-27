@@ -23,6 +23,8 @@ package core
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -67,6 +69,10 @@ const (
 	// chains + inbounds. Each path becomes a live listener; an unbounded
 	// explicit selection could mint thousands of them in one request.
 	FullProbeMaxApplyPaths = 64
+	// FullProbeMaxApplyPoolMembers caps how many proved paths one pool-mode
+	// apply call turns into pool member chains. Members share a single
+	// inbound listener, so the ceiling is on selection breadth, not ports.
+	FullProbeMaxApplyPoolMembers = 256
 
 	// Defaults for an omitted spec field.
 	DefaultFullProbeDepth            = 5
@@ -243,6 +249,12 @@ type FullProbeJob struct {
 	TotalAttempts int       `json:"total_attempts"`
 	StartedAt     time.Time `json:"startedAt"`
 	FinishedAt    time.Time `json:"finishedAt,omitempty"`
+	// RowsPruned reports that the job's durable attempt-result rows
+	// (GET /api/probes/full/{id}/results) were pruned — the per-job or global
+	// retention budget cut them, or the job's result bucket was evicted
+	// wholesale. The attempt counts above stay exact; only the row detail
+	// is partial.
+	RowsPruned bool `json:"rows_pruned,omitempty"`
 }
 
 // FullProbeApplySpec selects which successful paths of a finished job
@@ -268,6 +280,27 @@ type FullProbeApplySpec struct {
 	// IDPrefix names the generated chains and inbounds
 	// ("<prefix>-d<depth>-<n>"); empty means "fullprobe-<jobID>".
 	IDPrefix string `json:"id_prefix,omitempty"`
+	// Mode selects what apply builds: "" or "inbounds" keeps one inbound
+	// listener per path (the default); "pool" builds one pool load-balancing
+	// over the proved paths (each path becomes a member chain) behind a
+	// single inbound routed through it.
+	Mode string `json:"mode,omitempty"`
+	// PoolID names the generated pool in pool mode; empty means
+	// "<IDPrefix>-pool". Ignored in inbounds mode.
+	PoolID string `json:"pool_id,omitempty"`
+	// Selector is the generated pool's selection strategy in pool mode; nil
+	// means roundrobin. Ignored in inbounds mode.
+	Selector *FullProbeSelectorSpec `json:"selector,omitempty"`
+}
+
+// FullProbeSelectorSpec mirrors config.SelectorSpec for the apply request.
+// core cannot import config (config cannot import core either), so the API
+// handler maps this onto the config form when it writes the pool.
+type FullProbeSelectorSpec struct {
+	// Type is "random", "roundrobin", "sticky", "leastlatency".
+	Type string `json:"type"`
+	// Params is strategy-specific config, e.g. sticky: {"key":"domain"}.
+	Params map[string]any `json:"params,omitempty"`
 }
 
 // FullProbeApplyResult reports one generated chain + inbound pair.
@@ -315,5 +348,31 @@ func (j *FullProbeJob) BestPaths() []FullProbePath {
 		}
 		out = append(out, best)
 	}
+	return out
+}
+
+// AllPathsFastest returns every successful path across all levels, deduped by
+// its hop-join and ordered fastest first — the default selection pool mode
+// builds its member chains from. Ties on latency keep the shallower path
+// first (fewer hops for the same cost). The caller caps the result.
+func (j *FullProbeJob) AllPathsFastest() []FullProbePath {
+	seen := map[string]bool{}
+	var out []FullProbePath
+	for _, l := range j.Levels {
+		for _, p := range l.SuccessPaths {
+			key := strings.Join(p.Hops, ">")
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, p)
+		}
+	}
+	sort.SliceStable(out, func(a, b int) bool {
+		if out[a].Latency != out[b].Latency {
+			return out[a].Latency < out[b].Latency
+		}
+		return len(out[a].Hops) < len(out[b].Hops)
+	})
 	return out
 }

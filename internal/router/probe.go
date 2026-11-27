@@ -256,11 +256,16 @@ func (r *Router) probeOne(ctx context.Context, timeout time.Duration, o core.Out
 // verdict is a failure — the local network cannot reach those servers, so
 // selecting them would only burn a dial timeout. Outbounds with no verdict
 // yet are kept (fail-open) so a fresh config still routes while the first
-// probe round runs.
+// probe round runs. A chain member is judged by its ENTRY hop: that is the
+// only server the local network dials; the later hops ride the tunnel.
 func (r *Router) reachableCandidates(pool []core.Outbound) []core.Outbound {
 	out := pool[:0:0]
 	for _, o := range pool {
-		if ok, _, measured := r.metrics.Reachability(o.ID()); measured && !ok {
+		id := o.ID()
+		if cm, ok := o.(*chainMember); ok {
+			id = cm.firstHopID
+		}
+		if ok, _, measured := r.metrics.Reachability(id); measured && !ok {
 			continue
 		}
 		out = append(out, o)

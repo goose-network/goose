@@ -260,10 +260,11 @@ func (r *Router) probeOneHTTP(ctx context.Context, spec core.HTTPProbeSpec, targ
 // returns everything it observed: the response data, the phase trace, and the
 // path recorder the route machinery drew its legs into. It records NOTHING —
 // the caller decides how to persist (probeResult writes a probe row + metric
-// row for a probe round; a full-probe attempt writes only a metric row on
-// success). The recorder is seeded here, before the dial, so a probe that
-// fails before any dial still names what it was reaching for, and every leg
-// the route draws inside dial lands in out.path.
+// row for a probe round; a full-probe attempt writes a probe row for either
+// outcome and a metric row only on success). The recorder is seeded here,
+// before the dial, so a probe that fails before any dial still names what it
+// was reaching for, and every leg the route draws inside dial lands in
+// out.path.
 func (r *Router) performProbeAttempt(ctx context.Context, spec core.HTTPProbeSpec, target string, timeout time.Duration, bodyLimit int, dial probeDialFunc) probeOutcome {
 	start := time.Now()
 	tr := newProbeTrace(start)

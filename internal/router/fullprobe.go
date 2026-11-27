@@ -11,13 +11,17 @@
 //
 // Throughput: a worker pool of spec.Concurrency goroutines pulls attempts
 // through an x/time/rate limiter capped at spec.RPS (up to 10000/s).
-// Persistence is batched (RecordHTTPProbeAsync / RecordFullProbeJob), success
-// rows only — failures aggregate into the level's FailedItems, so a sweep of
-// mostly-dead outbounds does not write one durable row per failure.
+// Persistence is batched (RecordHTTPProbeAsync / RecordFullProbeJob). Every
+// issued attempt persists a probe row — success and failure alike — linked to
+// the job (FullProbeID/Depth); the store routes those rows to the job's own
+// result bucket, and mirrors successes into the shared probe history. Metric
+// rows stay success-only (they feed the 20000-row requests bucket); failures
+// also aggregate into the level's FailedItems.
 package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -29,6 +33,7 @@ import (
 	"time"
 
 	"github.com/goose-network/goose/internal/core"
+	"github.com/goose-network/goose/internal/metrics"
 	"golang.org/x/time/rate"
 )
 
@@ -95,6 +100,10 @@ func (r *Router) StartFullProbe(spec core.FullProbeSpec) (*core.FullProbeJob, er
 		return nil, fmt.Errorf("%w (%d running, limit %d)", core.ErrFullProbeCapacity, running, core.FullProbeMaxRunningJobs)
 	}
 	id := fmt.Sprintf("fp-%d-%d", time.Now().UnixNano(), fullProbeSeq.Add(1))
+	// The ID doubles as a URL path segment and as the job's row-bucket name
+	// in the metrics store, so it stays '/'-free; the 19-digit nanosecond
+	// prefix makes lexicographic order chronological until the year 2262 —
+	// the store evicts oldest jobs first by sorting these keys.
 	ctx, cancel := context.WithCancel(context.Background())
 	fp := &fullProbeRun{
 		job: core.FullProbeJob{
@@ -114,6 +123,46 @@ func (r *Router) StartFullProbe(spec core.FullProbeSpec) (*core.FullProbeJob, er
 		defer r.fullProbeWG.Done()
 		defer close(fp.done)
 		err := r.runFullProbe(ctx, fp, outs)
+		if err != nil {
+			// The terminal snapshot did not land. Keeping the live copy is
+			// not enough: the durable record stays "running" (or absent), so
+			// both retention paths exempt the job's row bucket forever —
+			// live eviction needs terminal proof, history prune exempts
+			// running snapshots — and zombie buckets would crowd out healthy
+			// finished jobs. Retry until the record lands (or the store
+			// closes / shutdown begins); the retry stays inside this
+			// goroutine so stopFullProbes still joins it.
+			log.Printf("router: full probe %s: retrying terminal snapshot persist: %v", id, err)
+			backoff := 500 * time.Millisecond
+		retry:
+			for {
+				timer := time.NewTimer(backoff)
+				select {
+				case <-timer.C:
+				case <-r.shutdown:
+					// Shutdown began joining: leave err non-nil so the live
+					// copy survives for reconcileFullProbeZombies at Open.
+					timer.Stop()
+					break retry
+				}
+				err = r.persistFullProbeFn(fp, true)
+				if err == nil {
+					break
+				}
+				if errors.Is(err, metrics.ErrClosed) {
+					log.Printf("router: full probe %s: giving up terminal snapshot persist: %v", id, err)
+					break
+				}
+				// Double AFTER the wait, clamped before doubling so the
+				// duration can never overflow into a hot retry loop.
+				if backoff < 10*time.Second {
+					backoff *= 2
+					if backoff > 10*time.Second {
+						backoff = 10 * time.Second
+					}
+				}
+			}
+		}
 		r.fullProbeMu.Lock()
 		if err == nil {
 			// The terminal snapshot is durable; drop the live copy so
@@ -121,9 +170,10 @@ func (r *Router) StartFullProbe(spec core.FullProbeSpec) (*core.FullProbeJob, er
 			// the finished job from the durable history from here on.
 			delete(r.fullProbes, id)
 		}
-		// On a failed terminal persist keep the live copy: evicting would
-		// expose the last "running" progress snapshot forever. done still
-		// closes (the runner exited), so it no longer counts as running.
+		// On give-up (closed store or shutdown) keep the live copy: evicting
+		// would expose the last "running" progress snapshot forever. done
+		// still closes (the runner exited), so it no longer counts as
+		// running; reconcileFullProbeZombies terminalizes it at next Open.
 		r.fullProbeMu.Unlock()
 	}()
 	return fp.snapshot(), nil
@@ -203,8 +253,12 @@ func (r *Router) CancelFullProbe(id string) bool {
 }
 
 // stopFullProbes cancels every running job and joins the runners. Used by
-// Close, where no router lock is held so joining is safe.
+// Close, where no router lock is held so joining is safe. shutdown closes
+// BEFORE the join so a runner retrying its terminal persist exits within one
+// backoff tick instead of holding Close open; the Once keeps a second Close
+// from double-closing the channel.
 func (r *Router) stopFullProbes() {
+	r.shutdownOnce.Do(func() { close(r.shutdown) })
 	r.fullProbeMu.Lock()
 	for _, fp := range r.fullProbes {
 		fp.cancel()
@@ -363,7 +417,9 @@ func (r *Router) runFullProbe(ctx context.Context, fp *fullProbeRun, outs []core
 	fp.job.State = state
 	fp.job.FinishedAt = time.Now()
 	fp.mu.Unlock()
-	return r.persistFullProbe(fp, true)
+	// Through the seam so tests can fail the first terminal write; in
+	// production this is exactly r.persistFullProbe(fp, true).
+	return r.persistFullProbeFn(fp, true)
 }
 
 // fullProbeResolvable reports whether every hop of prefix+cand still exists
@@ -495,10 +551,12 @@ func fullProbeBurst(rps int) int {
 }
 
 // fullProbeOne performs one attempt: dial the pinned path with dialHops and
-// issue the HTTP request through it. Success persists a probe row + metric
-// row (async, batched); failure only aggregates — the level's FailedItems
-// carry the counts and a sample error. The worker folds the result into the
-// live counters; this function only produces the outcome.
+// issue the HTTP request through it. Both outcomes persist a probe row
+// (async, batched) linked to the job — the store keeps it in the job's result
+// bucket, mirroring successes into the shared probe history — while only a
+// success adds a metric row. Failures also aggregate into the level's
+// FailedItems (counts and a sample error). The worker folds the result into
+// the live counters; this function only produces the outcome.
 func (r *Router) fullProbeOne(ctx context.Context, spec core.FullProbeSpec, a fullProbeAttempt, byID map[string]core.Outbound, jobID string) fullProbeResult {
 	var res fullProbeResult
 	hops := make([]core.Outbound, 0, len(a.prefix)+1)
@@ -557,6 +615,18 @@ func (r *Router) fullProbeOne(ctx context.Context, spec core.FullProbeSpec, a fu
 		r.recordRow(meta, chain, true, nil, latency, "", p.Path)
 		res.path = core.FullProbePath{Hops: ids, Latency: latency, Status: out.status}
 	} else {
+		// Failure: persist the attempt's evidence too (Error/Phase/Reason,
+		// timings and the partial path), linked to the job like the success
+		// row — assembleProbe measures the same span from start, so both
+		// outcomes carry a consistent Latency. No metric row: a failure may
+		// be the target's, not the route's, and thousands of dead candidates
+		// would flood the requests bucket. A cancel that cut the attempt
+		// before issue never reaches here (Skipped); one that cut it
+		// in-flight genuinely ran and lands with reason "canceled".
+		route := strings.Join(ids, ">")
+		p := assembleProbe(httpSpec, spec.Target, route, start, out)
+		p.FullProbeID, p.Depth = jobID, depth
+		_ = r.metrics.RecordHTTPProbeAsync(p)
 		_, reason := classifyProbeFailure(out.stage, out.err, out.timings)
 		res.failID, res.addr = a.cand, cand.Address()
 		res.reason, res.errStr = reason, out.err.Error()
@@ -568,8 +638,9 @@ func (r *Router) fullProbeOne(ctx context.Context, spec core.FullProbeSpec, a fu
 // boundaries, completion), otherwise at most ~1/s so a 10000 rps sweep does
 // not enqueue one snapshot per attempt. Progress snapshots ride the lossy
 // batched pipeline; the terminal snapshot is written synchronously by the
-// store. It returns the store's error (nil when throttled), so the runner
-// can keep the live copy if the terminal record failed to land.
+// store. It returns the store's error (nil when throttled); the runner
+// retries a failed terminal persist with backoff until it lands (the retry
+// loop logs, so a per-attempt log here would repeat every tick).
 func (r *Router) persistFullProbe(fp *fullProbeRun, force bool) error {
 	fp.mu.Lock()
 	now := time.Now()
@@ -580,9 +651,5 @@ func (r *Router) persistFullProbe(fp *fullProbeRun, force bool) error {
 	fp.lastPersist = now
 	snap := fp.job.Clone()
 	fp.mu.Unlock()
-	err := r.metrics.RecordFullProbeJob(snap)
-	if err != nil && snap.State != core.FullProbeRunning {
-		log.Printf("router: full probe %s: persist terminal snapshot: %v", snap.ID, err)
-	}
-	return err
+	return r.metrics.RecordFullProbeJob(snap)
 }

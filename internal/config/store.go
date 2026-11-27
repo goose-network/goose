@@ -254,10 +254,16 @@ func (s *OutboundSpec) PinOnly() bool {
 // usable from the local network is measured by probes and read back from
 // the outbound metrics (see ProbeConfig).
 type Pool struct {
-	ID          string       `json:"id"`
-	OutboundIDs []string     `json:"outbound_ids"`
-	Filters     []FilterSpec `json:"filters"`
-	Selector    SelectorSpec `json:"selector"`
+	ID          string   `json:"id"`
+	OutboundIDs []string `json:"outbound_ids"`
+	// ChainIDs adds whole chains as selection-time pool members: picking one
+	// expands into its hops (which must all be pinned outbound layers — no
+	// pool references). Mixed pools are allowed; member IDs must be distinct
+	// across OutboundIDs and ChainIDs. A pool with chain members is a
+	// path-pool: no chain layer may reference it (expansion depth stays 1).
+	ChainIDs []string     `json:"chain_ids,omitempty"`
+	Filters  []FilterSpec `json:"filters"`
+	Selector SelectorSpec `json:"selector"`
 }
 
 // ProbeConfig configures reachability probing of outbound proxy servers.
@@ -971,11 +977,12 @@ func (s *Store) rebuildProviderPoolLocked(poolID string) {
 	// so it never adopts an operator-built pool.
 	s.managedPools[poolID] = struct{}{}
 	if existing, ok := s.pools[poolID]; ok {
-		// keep user-configured filters/selector; if the pool is
+		// keep user-configured filters/selector/chain members; if the pool is
 		// brand-new and has no selector, the router falls back to a
 		// round-robin-style fallback selector.
 		pool.Filters = existing.Filters
 		pool.Selector = existing.Selector
+		pool.ChainIDs = existing.ChainIDs
 	}
 	s.pools[poolID] = pool
 }

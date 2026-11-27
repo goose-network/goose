@@ -291,6 +291,32 @@ func (e *Engine) StartAPI() error {
 		Addr:              engCfg.API.Listen,
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout bounds the WHOLE request read (headers + body).
+		// ReadHeaderTimeout alone leaves a client that sends headers promptly
+		// then dribbles a sub-1MiB body free to block in readJSON forever
+		// (MaxBytesReader bounds size, not time); even with the body parse
+		// moved outside writeMu, that request would pin a connection and
+		// stall engine.Close's 5s Shutdown. 30s is generous for admin config
+		// bodies (<=1MiB) on any sane link, and bounds slow-loris senders.
+		ReadTimeout: 30 * time.Second,
+		// WriteTimeout bounds the response write. Config writes do bounded
+		// work and answer small bodies — apply in seconds of validation +
+		// writes — so a flat 60s cannot break them, and it stops a client
+		// that never reads the response from pinning the handler (and
+		// writeMu, which spans the response write) indefinitely. Large reads
+		// (metrics, probe records, exit checks, full-probe results, job
+		// snapshots and the job list, and the config collection GETs) are
+		// the exception: their response is bounded only by n × row-size, so
+		// tens of MB can take minutes on a slow admin link. A trigger
+		// endpoint's 200-complete response is in that same class — it IS the
+		// round's records (a probe round's rows carry up to 1MiB of body
+		// each; an exit-check round is uncapped by fleet size), and the 25s
+		// wait window has already spent part of the flat budget — while its
+		// 202/error responses are small. The history-class handlers push the
+		// write deadline out via writeListJSON (api.go) so a steady reader
+		// is not severed mid-body; none streams an unbounded response (no
+		// SSE/websocket/Flush).
+		WriteTimeout: 60 * time.Second,
 	}
 	go func() { _ = e.apiSrv.ListenAndServe() }()
 	return nil

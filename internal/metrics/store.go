@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,12 +19,19 @@ import (
 )
 
 var (
-	bucketRequests   = []byte("requests")
-	bucketOutbounds  = []byte("outbounds")
-	bucketExitChecks = []byte("exitchecks")
-	bucketProbes     = []byte("probes")
-	bucketFullProbes = []byte("fullprobes")
+	bucketRequests      = []byte("requests")
+	bucketOutbounds     = []byte("outbounds")
+	bucketExitChecks    = []byte("exitchecks")
+	bucketProbes        = []byte("probes")
+	bucketFullProbes    = []byte("fullprobes")
+	bucketFullProbeRows = []byte("fullproberows")
 )
+
+// ErrClosed is returned by the synchronous record paths after Close.
+// Callers that retry a failed write (the full-probe runner's terminal
+// persist) match it with errors.Is to stop retrying a store that will never
+// accept the record again.
+var ErrClosed = errors.New("metrics: store closed")
 
 // Store is the metrics store: a bbolt DB for durable per-request records
 // plus an in-memory stats view per outbound for live selection.
@@ -72,6 +80,16 @@ type Store struct {
 	reqRows      int64
 	probeRows    atomic.Int64
 	probeWriteMu sync.Mutex
+
+	// fpJobRows / fpRowsTotal track the full-probe attempt rows stored under
+	// bucketFullProbeRows (one nested bucket per job ID). probeLoop owns them;
+	// probeWriteMu spans each write transaction AND the counter publish, and
+	// every db.Batch attempt reloads the baselines, exactly like probeRows —
+	// so prune and eviction decisions are exact. The sync RecordHTTPProbe
+	// path never writes job rows (full-probe attempts are always async), so
+	// it does not touch these counters.
+	fpJobRows   map[string]int64
+	fpRowsTotal atomic.Int64
 }
 
 // probeWrite is one row for the probe pipeline: exactly one of probe / job
@@ -109,7 +127,9 @@ const (
 	// mirroring the request pipeline's 64-row batch.
 	probeBatchSize = 64
 	// fullProbeHistory caps how many finished full-probe jobs the bucket
-	// keeps; older ones are pruned when a terminal snapshot lands.
+	// keeps; older ones are pruned when a terminal snapshot lands. Running
+	// jobs and jobs whose row buckets still exist are exempt (see
+	// pruneFullProbeJobs), so the cap is soft by that bounded count.
 	fullProbeHistory = 64
 	// requestHistory / probeHistory cap the durable row buckets. A full
 	// probe sweep at the 10000 rps limit writes thousands of success rows
@@ -118,6 +138,19 @@ const (
 	// that crosses them — a cursor walk, never a per-row scan.
 	requestHistory = 20000
 	probeHistory   = 20000
+	// fullProbeRowsPerJob caps one job's durable attempt rows. It equals
+	// FullProbeMaxTotalAttempts, so a job at its attempt cap loses nothing
+	// in-job; the prune is belt-and-suspenders against ID collisions across
+	// jobs writing the same bucket.
+	fullProbeRowsPerJob = 500000
+	// fullProbeRowJobs caps how many jobs' result buckets are kept, and
+	// fullProbeRowsTotal caps the rows across all of them (the global disk
+	// budget). Crossing either evicts the oldest FINISHED job buckets
+	// wholesale — a running job's rows are never evicted (at most
+	// FullProbeMaxRunningJobs run at once, so the transient worst case is
+	// bounded: two maxed running jobs ≈ 1M rows).
+	fullProbeRowJobs   = 8
+	fullProbeRowsTotal = 500000
 )
 
 // Open opens (or creates) the bbolt DB at path and starts the writer.
@@ -127,7 +160,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("metrics: open %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketRequests, bucketOutbounds, bucketExitChecks, bucketProbes, bucketFullProbes} {
+		for _, b := range [][]byte{bucketRequests, bucketOutbounds, bucketExitChecks, bucketProbes, bucketFullProbes, bucketFullProbeRows} {
 			if _, e := tx.CreateBucketIfNotExists(b); e != nil {
 				return e
 			}
@@ -151,6 +184,7 @@ func Open(path string) (*Store, error) {
 		done:      make(chan struct{}),
 		probeIn:   make(chan probeWrite, probeWriteBuf),
 		probeDone: make(chan struct{}),
+		fpJobRows: map[string]int64{},
 	}
 	// Seed the retention counters from the existing buckets (keys only —
 	// no row decoding). A pre-cap DB may be over the limit; the first flush
@@ -160,11 +194,72 @@ func Open(path string) (*Store, error) {
 		var n int64
 		_ = tx.Bucket(bucketProbes).ForEach(func(k, _ []byte) error { n++; return nil })
 		s.probeRows.Store(n)
+		var total int64
+		_ = tx.Bucket(bucketFullProbeRows).ForEachBucket(func(k []byte) error {
+			var rows int64
+			_ = tx.Bucket(bucketFullProbeRows).Bucket(k).ForEach(func(_, _ []byte) error { rows++; return nil })
+			s.fpJobRows[string(k)] = rows
+			total += rows
+			return nil
+		})
+		s.fpRowsTotal.Store(total)
 		return nil
 	})
+	// A DB left over the job/row budget (an older build, or a crash between
+	// flushes) is pruned once here, before the writers start. Open already
+	// reconciled every running snapshot to a terminal state and no runner
+	// exists in this process yet, so a bucket whose snapshot is missing
+	// belongs to a crashed job, not a live one — safe to evict (live=false).
+	if len(s.fpJobRows) > fullProbeRowJobs || s.fpRowsTotal.Load() > fullProbeRowsTotal {
+		// A failed commit keeps the seeded (over-budget) counters; the first
+		// flush prunes again. Publishing counters reduced by a rolled-back
+		// transaction would undercount the real rows forever.
+		_ = s.pruneFullProbeRowsAtOpen()
+	}
 	go s.loop()
 	go s.probeLoop()
 	return s, nil
+}
+
+// pruneFullProbeRowsAtOpen is Open's one-shot retention pass, factored out so
+// the commit-failure path is unit-testable. It mirrors the flush discipline:
+// eviction runs on a COPY of the seeded baselines inside the transaction, and
+// the live map/total are replaced only after Update commits. bbolt rolls back
+// on commit failure (e.g. ENOSPC), so mutating s.fpJobRows / fpRowsTotal
+// inside the tx would leave the counters permanently below the committed row
+// counts — and the still-present buckets invisible to flush eviction (which
+// trusts the counters) until the next restart. No lock guards the publish:
+// Open starts loop()/probeLoop() only after this returns, so no writer can
+// observe the counters yet.
+func (s *Store) pruneFullProbeRowsAtOpen() error {
+	var jobRows map[string]int64
+	var total int64
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var e error
+		jobRows, total, e = s.pruneFullProbeRowsTx(tx)
+		return e
+	})
+	if err != nil {
+		return err
+	}
+	s.fpJobRows = jobRows
+	s.fpRowsTotal.Store(total)
+	return nil
+}
+
+// pruneFullProbeRowsTx is the prune's transaction body, split from the
+// publish so a test can run the eviction and then force a rollback — a
+// closed DB fails in Begin, before the body ever runs, and cannot catch an
+// in-tx mutation. It must only touch the copy and the tx buckets: the live
+// s.fpJobRows / fpRowsTotal are published by the caller after commit, never
+// here, or a rolled-back eviction would undercount the surviving rows.
+func (s *Store) pruneFullProbeRowsTx(tx *bolt.Tx) (map[string]int64, int64, error) {
+	jobRows := make(map[string]int64, len(s.fpJobRows))
+	for id, n := range s.fpJobRows {
+		jobRows[id] = n
+	}
+	total := evictFullProbeRowBuckets(tx.Bucket(bucketFullProbeRows), tx.Bucket(bucketFullProbes), jobRows, s.fpRowsTotal.Load(), false)
+	return jobRows, total, nil
 }
 
 // reconcileFullProbeZombies lands every persisted running-state job in
@@ -553,7 +648,7 @@ func (s *Store) RecordFullProbeJob(j *core.FullProbeJob) error {
 		return s.enqueueProbe(probeWrite{job: j})
 	}
 	if s.closed.Load() {
-		return errors.New("metrics: store closed")
+		return ErrClosed
 	}
 	val, err := json.Marshal(j)
 	if err != nil {
@@ -561,10 +656,24 @@ func (s *Store) RecordFullProbeJob(j *core.FullProbeJob) error {
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		fb := tx.Bucket(bucketFullProbes)
-		if err := fb.Put([]byte(j.ID), val); err != nil {
+		v := val
+		// A retention pass may already have marked the durable record's
+		// rows pruned; the runner's snapshot never carries that mark, so
+		// preserve it rather than clearing it on overwrite.
+		if prev := fb.Get([]byte(j.ID)); prev != nil {
+			var old core.FullProbeJob
+			if json.Unmarshal(prev, &old) == nil && old.RowsPruned && !j.RowsPruned {
+				marked := *j
+				marked.RowsPruned = true
+				if mv, merr := json.Marshal(&marked); merr == nil {
+					v = mv
+				}
+			}
+		}
+		if err := fb.Put([]byte(j.ID), v); err != nil {
 			return err
 		}
-		pruneFullProbeJobs(fb, j.ID)
+		pruneFullProbeJobs(fb, tx.Bucket(bucketFullProbeRows), j.ID)
 		return nil
 	})
 }
@@ -615,10 +724,13 @@ func (s *Store) RecentHTTPProbes(n int, route string) ([]core.HTTPProbe, error) 
 
 // probeLoop drains the probe write channel and batch-inserts into bbolt,
 // mirroring loop() but routing each row to its own bucket: HTTP probe records
-// to bucketProbes under a time-ordered key, full-probe job progress snapshots
-// to bucketFullProbes keyed by job ID (so a progress snapshot overwrites the
-// previous one in place). Terminal job snapshots never come through here —
-// RecordFullProbeJob writes them synchronously so they cannot be dropped.
+// to bucketProbes under a time-ordered key, full-probe attempt rows (those
+// carrying a FullProbeID) to their job's nested bucket under bucketFullProbeRows
+// — successes dual-write to both, failures land only in the job bucket — and
+// full-probe job progress snapshots to bucketFullProbes keyed by job ID (so a
+// progress snapshot overwrites the previous one in place). Terminal job
+// snapshots never come through here — RecordFullProbeJob writes them
+// synchronously so they cannot be dropped.
 func (s *Store) probeLoop() {
 	defer close(s.probeDone)
 	batch := make([]probeWrite, 0, probeBatchSize)
@@ -627,16 +739,24 @@ func (s *Store) probeLoop() {
 			return
 		}
 		var delta int64
+		var jobRows map[string]int64
+		var fpTotal int64
 		s.probeWriteMu.Lock()
 		err := s.db.Batch(func(tx *bolt.Tx) error {
 			// Batch may re-run fn in a fresh tx if a batch-mate fails:
-			// re-read the shared baseline each attempt. probeWriteMu spans
-			// the commit and the publish, so it equals the committed row
-			// count (see the probeRows field comment).
+			// re-read the shared baselines each attempt. probeWriteMu spans
+			// the commit and the publish, so they equal the committed row
+			// counts (see the probeRows field comment).
 			base := s.probeRows.Load()
 			rows := base
+			jobRows = make(map[string]int64, len(s.fpJobRows))
+			for id, n := range s.fpJobRows {
+				jobRows[id] = n
+			}
+			fpTotal = s.fpRowsTotal.Load()
 			pb := tx.Bucket(bucketProbes)
 			fb := tx.Bucket(bucketFullProbes)
+			fr := tx.Bucket(bucketFullProbeRows)
 			for _, w := range batch {
 				switch {
 				case w.probe != nil:
@@ -644,21 +764,56 @@ func (s *Store) probeLoop() {
 					if err != nil {
 						continue
 					}
-					key := []byte(fmt.Sprintf("%d-%s", w.probe.StartedAt.UnixNano(), w.probe.ID))
-					isNew := pb.Get(key) == nil
-					if pb.Put(key, val) == nil && isNew {
-						rows++ // an overwrite Put (duplicate key) adds no row
+					if w.probe.FullProbeID != "" {
+						// A full-probe attempt row belongs to its job's
+						// bucket, keyed by the probe ID verbatim: the ID's
+						// 19-digit nanosecond prefix orders attempts
+						// chronologically, so the reader pages newest-first
+						// and the prune drops oldest-first.
+						jb, berr := fr.CreateBucketIfNotExists([]byte(w.probe.FullProbeID))
+						if berr != nil {
+							return berr
+						}
+						pkey := []byte(w.probe.ID)
+						isNew := jb.Get(pkey) == nil
+						if jb.Put(pkey, val) == nil && isNew {
+							jobRows[w.probe.FullProbeID]++
+							fpTotal++
+						}
+						if jobRows[w.probe.FullProbeID] > fullProbeRowsPerJob {
+							kept := pruneTimeBucket(jb, jobRows[w.probe.FullProbeID], fullProbeRowsPerJob)
+							fpTotal -= jobRows[w.probe.FullProbeID] - kept
+							jobRows[w.probe.FullProbeID] = kept
+							markFullProbeRowsPruned(fb, w.probe.FullProbeID)
+						}
+					}
+					// The shared probe history keeps plain probe rounds and
+					// the full-probe SUCCESS mirror only — failures would
+					// push the successes a ProbesPage reader wants out of
+					// the 20000-row window.
+					if w.probe.FullProbeID == "" || w.probe.Success {
+						key := []byte(fmt.Sprintf("%d-%s", w.probe.StartedAt.UnixNano(), w.probe.ID))
+						isNew := pb.Get(key) == nil
+						if pb.Put(key, val) == nil && isNew {
+							rows++ // an overwrite Put (duplicate key) adds no row
+						}
 					}
 				case w.job != nil:
 					// A queued progress snapshot must not clobber a
 					// terminal record that already landed synchronously:
 					// the runner enqueues progress before its final
 					// persist, and this buffer may flush after it.
-					if w.job.State == core.FullProbeRunning {
-						if prev := fb.Get([]byte(w.job.ID)); prev != nil {
-							var old core.FullProbeJob
-							if json.Unmarshal(prev, &old) == nil && old.State != core.FullProbeRunning {
+					if prev := fb.Get([]byte(w.job.ID)); prev != nil {
+						var old core.FullProbeJob
+						if json.Unmarshal(prev, &old) == nil {
+							if w.job.State == core.FullProbeRunning && old.State != core.FullProbeRunning {
 								continue
+							}
+							// Likewise a retention mark on the durable
+							// record must survive a later snapshot from the
+							// runner, which never sees RowsPruned.
+							if old.RowsPruned && !w.job.RowsPruned {
+								w.job.RowsPruned = true
 							}
 						}
 					}
@@ -671,10 +826,15 @@ func (s *Store) probeLoop() {
 			}
 			rows = pruneTimeBucket(pb, rows, probeHistory)
 			delta = rows - base
+			if len(jobRows) > fullProbeRowJobs || fpTotal > fullProbeRowsTotal {
+				fpTotal = evictFullProbeRowBuckets(fr, fb, jobRows, fpTotal, true)
+			}
 			return nil
 		})
 		if err == nil {
 			s.probeRows.Add(delta)
+			s.fpJobRows = jobRows
+			s.fpRowsTotal.Store(fpTotal)
 		}
 		s.probeWriteMu.Unlock()
 		batch = batch[:0]
@@ -738,10 +898,24 @@ func pruneTimeBucket(b *bolt.Bucket, count int64, max int64) int64 {
 // be the one pruned. The count comes from the cursor, not Stats().KeyN:
 // Stats walks spilled pages only, so keys staged by this very transaction
 // are invisible to it and the guard would read a stale (often zero) count.
-func pruneFullProbeJobs(fb *bolt.Bucket, landing string) {
+//
+// Invariant: a snapshot is pruned from history ONLY when its row bucket is
+// already gone, and never while the job runs. Two more exemptions enforce
+// it: a running snapshot (a long-running job must not lose its live record
+// after fullProbeHistory newer terminal jobs land), and any snapshot whose
+// row bucket still exists in fr — deleting that snapshot would strand the
+// bucket as a live eviction's "missing snapshot" case forever. The history
+// is therefore bounded by fullProbeHistory + running jobs + jobs with row
+// buckets (itself capped near fullProbeRowJobs), not exactly fullProbeHistory.
+// With those exemptions, a live job whose bucket exists but whose snapshot
+// is missing can only be an in-flight job whose first LOSSY progress
+// snapshot has not landed yet — which is exactly what evictFullProbeRowBuckets'
+// live mode protects.
+func pruneFullProbeJobs(fb, fr *bolt.Bucket, landing string) {
 	type jobKey struct {
-		id string
-		at time.Time
+		id   string
+		at   time.Time
+		live bool // running snapshot or surviving row bucket: never prune
 	}
 	var all []jobKey
 	_ = fb.ForEach(func(k, v []byte) error {
@@ -751,7 +925,11 @@ func pruneFullProbeJobs(fb *bolt.Bucket, landing string) {
 			if j.FinishedAt.After(at) {
 				at = j.FinishedAt
 			}
-			all = append(all, jobKey{id: string(k), at: at})
+			all = append(all, jobKey{
+				id:   string(k),
+				at:   at,
+				live: j.State == core.FullProbeRunning || fr.Bucket(k) != nil,
+			})
 		}
 		return nil
 	})
@@ -764,12 +942,212 @@ func pruneFullProbeJobs(fb *bolt.Bucket, landing string) {
 		if remove == 0 {
 			break
 		}
-		if j.id == landing {
+		if j.id == landing || j.live {
 			continue
 		}
 		_ = fb.Delete([]byte(j.id))
 		remove--
 	}
+}
+
+// markFullProbeRowsPruned sets RowsPruned on the job's durable snapshot by
+// read-modify-write, preserving its State and every other field — a
+// retention mark must never revert a terminal record or resurrect a running
+// zombie. Called inside the write transaction that pruned or evicted the
+// job's rows.
+func markFullProbeRowsPruned(fb *bolt.Bucket, id string) {
+	v := fb.Get([]byte(id))
+	if v == nil {
+		return
+	}
+	var j core.FullProbeJob
+	if json.Unmarshal(v, &j) != nil || j.RowsPruned {
+		return
+	}
+	j.RowsPruned = true
+	if val, err := json.Marshal(&j); err == nil {
+		_ = fb.Put([]byte(id), val)
+	}
+}
+
+// evictFullProbeRowBuckets deletes whole job result buckets until the job
+// count and the global row budget hold again, updating jobRows (the flush's
+// per-job baseline copy) and returning the new total.
+//
+// Invariant B: a LIVE flush (live=true) deletes a bucket ONLY when a durable
+// TERMINAL snapshot proves the job finished. A running snapshot exempts the
+// bucket, and so does a MISSING or undecodable one: progress snapshots ride
+// the lossy batched pipeline, so a live job's first snapshot may not have
+// landed yet, and pruneFullProbeJobs (invariant A) never prunes a snapshot
+// whose row bucket still exists — so nil-with-bucket can only mean an
+// in-flight job, never a finished one. Treating nil as finished would evict
+// a running job's whole bucket mid-sweep, and markFullProbeRowsPruned would
+// no-op on the absent snapshot: silent row loss behind exact UI counts.
+// At Open (live=false) nil is NOT ambiguous: reconcileFullProbeZombies has
+// already landed every running snapshot as terminal and no runner exists in
+// this process yet, so a missing/undecodable snapshot means a crashed job
+// whose orphaned bucket must stay evictable.
+//
+// Skipping running/ambiguous jobs may leave the budget exceeded. The
+// overshoot is bounded by the running jobs (at most FullProbeMaxRunningJobs)
+// PLUS exited jobs whose terminal persist is still retrying: the router
+// retries with backoff until the record lands or the store closes. A store
+// that never accepts the write again keeps those buckets exempt until
+// restart, when reconcileFullProbeZombies terminalizes them.
+// Eviction order is lexicographic by job ID: IDs are minted
+// "fp-<19-digit UnixNano>-<seq>" with no '/', so lexicographic order is
+// chronological — oldest first. Each evicted job's snapshot is marked
+// RowsPruned so the UI can say the detail is partial, not that the job never
+// ran those attempts.
+func evictFullProbeRowBuckets(fr, fb *bolt.Bucket, jobRows map[string]int64, total int64, live bool) int64 {
+	if len(jobRows) <= fullProbeRowJobs && total <= fullProbeRowsTotal {
+		return total
+	}
+	ids := make([]string, 0, len(jobRows))
+	for id := range jobRows {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if len(jobRows) <= fullProbeRowJobs && total <= fullProbeRowsTotal {
+			break
+		}
+		if v := fb.Get([]byte(id)); v != nil {
+			var j core.FullProbeJob
+			if json.Unmarshal(v, &j) != nil {
+				// Undecodable: no proof of completion while live; at
+				// Open it is corrupt debris from a dead process.
+				if live {
+					continue
+				}
+			} else if j.State == core.FullProbeRunning {
+				continue
+			}
+		} else if live {
+			// No durable snapshot yet: the job may still be running
+			// (its first lossy progress snapshot has not landed).
+			continue
+		}
+		if fr.DeleteBucket([]byte(id)) != nil {
+			continue
+		}
+		total -= jobRows[id]
+		delete(jobRows, id)
+		markFullProbeRowsPruned(fb, id)
+	}
+	return total
+}
+
+// FullProbeResultFilter narrows a job's attempt results. Every field is
+// optional; the zero value matches all rows.
+type FullProbeResultFilter struct {
+	// Outcome is "success" or "failed"; empty matches both.
+	Outcome string
+	// Depth is the exact chain length to match (valid depths are >= 1);
+	// zero means unset.
+	Depth int
+	// Reason matches the failure's classified reason slug exactly.
+	Reason string
+	// Route matches the attempt's hop-join route ("a>b") exactly.
+	Route string
+	// Hop matches an outbound appearing at ANY position of the route.
+	Hop string
+	// LastHop matches the route's final outbound.
+	LastHop string
+}
+
+// FullProbeResults returns up to n of one job's durable attempt rows, newest
+// first, narrowed by f. before is a probe ID cursor: only rows strictly older
+// (lexicographically smaller keys) are returned, so a page's last row ID
+// pages past itself. Seek lands on the first key >= before even when that
+// exact row was pruned, so pagination stays correct across retention cuts.
+// A job with no result bucket (unknown, evicted, or no issued attempts)
+// yields an empty slice, not an error.
+func (s *Store) FullProbeResults(jobID string, n int, before string, f FullProbeResultFilter) ([]core.HTTPProbe, error) {
+	if n < 1 {
+		n = 1
+	}
+	out := make([]core.HTTPProbe, 0, n)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		jb := tx.Bucket(bucketFullProbeRows).Bucket([]byte(jobID))
+		if jb == nil {
+			return nil
+		}
+		c := jb.Cursor()
+		var k, v []byte
+		if before == "" {
+			k, v = c.Last()
+		} else {
+			// Seek positions at the first key >= before (or past the end,
+			// where Prev yields the last key); Prev then steps to the first
+			// key strictly below before — the cursor row itself is excluded.
+			c.Seek([]byte(before))
+			k, v = c.Prev()
+		}
+		for ; k != nil; k, v = c.Prev() {
+			// Two-stage decode: unmarshal only the predicate fields first,
+			// so a filtered page over a 500000-row job does not materialize
+			// every row's headers, body and path graph.
+			var head struct {
+				Success bool   `json:"success"`
+				Depth   int    `json:"depth,omitempty"`
+				Reason  string `json:"reason,omitempty"`
+				Route   string `json:"route"`
+			}
+			if json.Unmarshal(v, &head) != nil {
+				continue
+			}
+			switch f.Outcome {
+			case "success":
+				if !head.Success {
+					continue
+				}
+			case "failed":
+				if head.Success {
+					continue
+				}
+			}
+			if f.Depth != 0 && head.Depth != f.Depth {
+				continue
+			}
+			if f.Reason != "" && head.Reason != f.Reason {
+				continue
+			}
+			if f.Route != "" && head.Route != f.Route {
+				continue
+			}
+			if f.Hop != "" || f.LastHop != "" {
+				hops := strings.Split(head.Route, ">")
+				if f.Hop != "" {
+					found := false
+					for _, h := range hops {
+						if h == f.Hop {
+							found = true
+							break
+						}
+					}
+					if !found {
+						continue
+					}
+				}
+				if f.LastHop != "" && hops[len(hops)-1] != f.LastHop {
+					continue
+				}
+			}
+			var p core.HTTPProbe
+			if err := json.Unmarshal(v, &p); err == nil {
+				out = append(out, p)
+				if len(out) >= n {
+					return nil
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // FullProbeJob returns the persisted snapshot of one full-probe job by ID.

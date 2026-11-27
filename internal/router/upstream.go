@@ -335,9 +335,20 @@ func (r *Router) dialPoolSnapshot(ctx context.Context, what string, snap poolSna
 	var lastErr error
 	attempt := 0
 	for len(cands) > 0 {
-		out, err := snap.selector.Pick(cands, meta)
+		picked, err := snap.selector.Pick(cands, meta)
 		if err != nil {
 			return nil, fmt.Errorf("router: upstream_proxy %s select: %w", what, err)
+		}
+		// Normalize the pick to the snapshot's own instance of that member:
+		// a sticky selector's cache can hand back a pointer from an earlier
+		// rebuild epoch, and the dial (and the failover removal below) must
+		// act on the live wrapper, not the stale one.
+		out := picked
+		for _, o := range cands {
+			if o.ID() == picked.ID() {
+				out = o
+				break
+			}
 		}
 		// Every attempt is its own node, so a member that failed keeps its own
 		// address, error and classification instead of being overwritten by
@@ -345,18 +356,38 @@ func (r *Router) dialPoolSnapshot(ctx context.Context, what string, snap poolSna
 		// member dial rides the engine stack, not a socket the outer dispatch
 		// happened to leave open.
 		attempt++
-		to := meta.Path.AddProxyAttempt(out.ID(), out.Address(), attempt)
-		dialCtx, cancel := context.WithTimeout(ctx, upstreamDialTimeout)
-		conn, derr := meta.Path.Observe(core.Leg{
-			Kind: core.LegDial, To: to, Target: meta.Target(),
-		}, nil, func() (net.Conn, error) {
-			return r.CheckDial(dialCtx, out, meta.Network, meta.Target())
-		})
-		cancel()
-		// Report the member this attempt rode on a probe trace; last attempt
-		// wins, so a success names the member that served it and a total
-		// failure names the member tried last.
-		noteUpstreamVia(ctx, out.ID(), out.Address())
+		var to string
+		var conn net.Conn
+		var derr error
+		if cm, ok := out.(*chainMember); ok {
+			// A chain member dials as its whole pinned path — no selection,
+			// no per-hop failover (parity with named chains). The attempt
+			// node names the member; the entry hop is what the local network
+			// reaches, so it carries the address and the via note.
+			to = meta.Path.AddProxyAttempt(cm.id, cm.firstHopAddr, attempt)
+			dialCtx, cancel := context.WithTimeout(ctx, upstreamDialTimeout)
+			conn, derr = meta.Path.Observe(core.Leg{
+				Kind: core.LegDial, To: to, Target: meta.Target(),
+			}, nil, func() (net.Conn, error) {
+				c, _, e := r.dialHops(dialCtx, cm.hops, meta)
+				return c, e
+			})
+			cancel()
+			noteUpstreamVia(ctx, cm.firstHopID, cm.firstHopAddr)
+		} else {
+			to = meta.Path.AddProxyAttempt(out.ID(), out.Address(), attempt)
+			dialCtx, cancel := context.WithTimeout(ctx, upstreamDialTimeout)
+			conn, derr = meta.Path.Observe(core.Leg{
+				Kind: core.LegDial, To: to, Target: meta.Target(),
+			}, nil, func() (net.Conn, error) {
+				return r.CheckDial(dialCtx, out, meta.Network, meta.Target())
+			})
+			cancel()
+			// Report the member this attempt rode on a probe trace; last attempt
+			// wins, so a success names the member that served it and a total
+			// failure names the member tried last.
+			noteUpstreamVia(ctx, out.ID(), out.Address())
+		}
 		if derr == nil {
 			// The winning member's handshake toward the destination happened
 			// inside the same call, so name the far end of that leg too.
@@ -372,11 +403,12 @@ func (r *Router) dialPoolSnapshot(ctx context.Context, what string, snap poolSna
 }
 
 // withoutOutbound returns pool without its first occurrence of out. Members
-// are compared by identity: a pool snapshot holds the same outbound wrapper
-// pointers the router built.
+// are compared by ID: pool member IDs are unique, and a selector may hand
+// back a stale-epoch pointer for an ID the snapshot still holds — comparing
+// pointers would fail to remove it and spin the failover loop.
 func withoutOutbound(pool []core.Outbound, out core.Outbound) []core.Outbound {
 	for i, o := range pool {
-		if o == out {
+		if o.ID() == out.ID() {
 			return append(pool[:i], pool[i+1:]...)
 		}
 	}

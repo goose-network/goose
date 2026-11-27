@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"slices"
 	"sync"
@@ -68,6 +69,16 @@ type Router struct {
 	fullProbeMu sync.Mutex
 	fullProbes  map[string]*fullProbeRun
 	fullProbeWG sync.WaitGroup
+	// persistFullProbeFn is the terminal-persist seam: New wires the real
+	// persistFullProbe. Tests override it to inject transient store failures
+	// without disk tricks; production never reassigns it.
+	persistFullProbeFn func(fp *fullProbeRun, force bool) error
+	// shutdown closes when stopFullProbes begins joining, so a runner
+	// retrying its terminal persist bails instead of holding Close open for
+	// another backoff tick. shutdownOnce keeps the close idempotent — Close
+	// may run twice (explicit call plus defer).
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 
 	copyBufPool sync.Pool
 	metricSeq   uint64
@@ -110,8 +121,10 @@ func New(cfg *config.Store, ms *metrics.Store, stk stack.Stack) *Router {
 		pools:       map[string]*builtPool{},
 		chains:      map[string]core.Chain{},
 		fallback:    &fallbackSelector{},
+		shutdown:    make(chan struct{}),
 		copyBufPool: sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }},
 	}
+	r.persistFullProbeFn = r.persistFullProbe
 	r.rebuild()
 	return r
 }
@@ -143,6 +156,24 @@ func (r *Router) Rebuild() {
 }
 
 func (r *Router) rebuild() {
+	// Snapshot epoch: each config collection is read exactly ONCE per
+	// rebuild; collections consumed by several passes (pools, chains) are
+	// snapshotted here and shared by every pass. config.Store hands out a
+	// FRESH slice of immutable spec pointers per getter call, and
+	// SetPool/SetChain/SetOutbound/SetInbound each bump the version with no
+	// serialization against the engine watch goroutine that runs Rebuild.
+	// Re-reading a getter between passes could therefore mix epochs: a
+	// pool-mode full-probe apply writes SetChain xN -> SetPool -> SetInbound
+	// back-to-back, and a SetPool landing between the pools pass and the
+	// member-attach pass would surface a pool ID that r.pools never built —
+	// a nil *builtPool dereference and an engine crash. One snapshot per
+	// collection makes cross-pass membership coherent by construction.
+	// (Outbounds and Inbounds feed a single pass each, so their one read
+	// happens in that pass; cross-collection references are all guarded by
+	// existence checks.)
+	pools := r.cfg.Pools()
+	chains := r.cfg.Chains()
+
 	// build outbounds
 	r.outbounds = map[string]core.Outbound{}
 	for _, spec := range r.cfg.Outbounds() {
@@ -174,9 +205,9 @@ func (r *Router) rebuild() {
 		// wrap with stats + id
 		r.outbounds[spec.ID] = &outboundWrapper{Outbound: o, id: spec.ID, protocol: spec.Protocol, ms: r.metrics, pinOnly: spec.PinOnly()}
 	}
-	// build pools
+	// build pools (from the epoch snapshot — see top of rebuild)
 	r.pools = map[string]*builtPool{}
-	for _, p := range r.cfg.Pools() {
+	for _, p := range pools {
 		bp := &builtPool{id: p.ID}
 		for _, id := range p.OutboundIDs {
 			if o, ok := r.outbounds[id]; ok {
@@ -200,8 +231,31 @@ func (r *Router) rebuild() {
 	// wrapped in a poolSelector that carries the pool's candidates, so the
 	// router can recover them at dispatch time without a pool lookup;
 	// outbound layers pin that one server for the hop.
+	//
+	// A path-pool (one with chain members) may not be a chain layer: a member
+	// chain expands into hops at selection time, and a chain traversing a
+	// path-pool would nest that expansion. The API refuses such writes; this
+	// is the backstop for configs loaded from disk — skip the WHOLE chain
+	// (never silently shorten it) and say so.
+	pathPoolIDs := map[string]bool{}
+	for _, p := range pools {
+		if len(p.ChainIDs) > 0 {
+			pathPoolIDs[p.ID] = true
+		}
+	}
 	r.chains = map[string]core.Chain{}
-	for _, c := range r.cfg.Chains() {
+	for _, c := range chains {
+		forbidden := false
+		for _, ref := range c.Layers {
+			if pathPoolIDs[ref] {
+				log.Printf("router: chain %s references path-pool %s (a pool with chain members); skipping the whole chain", c.ID, ref)
+				forbidden = true
+				break
+			}
+		}
+		if forbidden {
+			continue
+		}
 		var ch core.Chain
 		for _, ref := range c.Layers {
 			if bp, ok := r.pools[ref]; ok {
@@ -222,6 +276,14 @@ func (r *Router) rebuild() {
 		}
 		r.chains[c.ID] = ch
 	}
+	// Attach chain members to pools. Runs AFTER chains and BEFORE policies
+	// so resolveRoute captures the token-bearing candidate slices; both
+	// inputs are the epoch snapshots taken at the top of rebuild.
+	chainSpecs := make(map[string]*config.ChainSpec, len(chains))
+	for _, c := range chains {
+		chainSpecs[c.ID] = c
+	}
+	r.attachChainMembersLocked(pools, chainSpecs)
 	// build policy resolver
 	r.policy = policyResolver{inbounds: map[string]*inboundPolicy{}}
 	for _, in := range r.cfg.Inbounds() {
@@ -245,6 +307,73 @@ func (r *Router) rebuild() {
 	// Wire the reachability prober to the engine's probe config: running
 	// iff Engine.Probes.Enabled, re-parameterized when its cadence changes.
 	r.reconcileProberLocked()
+}
+
+// attachChainMembersLocked is rebuild's member-attach pass. pools and
+// chainSpecs are the SAME epoch snapshots the pools and chains passes
+// consumed (see rebuild's snapshot-epoch comment): membership is coherent
+// across passes by construction even while concurrent config writes bump
+// the store version between getter calls. Caller holds r.mu (or is the
+// pre-publication New constructor).
+//
+// Each member chain is resolved from its config spec against r.outbounds
+// directly — NOT via the built r.chains, whose layers may have been
+// shortened by unknown references: a member must expand to exactly its
+// proved path or not be selectable at all. Every layer must be a pinned
+// outbound that exists and is not pool-shadowed (routing resolves pools
+// first); an ineligible member is skipped with a log, never partially
+// attached.
+func (r *Router) attachChainMembersLocked(pools []*config.Pool, chainSpecs map[string]*config.ChainSpec) {
+	for _, p := range pools {
+		if len(p.ChainIDs) == 0 {
+			continue
+		}
+		// Snapshot coherence guarantees every pool in `pools` was built in
+		// the pools pass. Guard anyway: a future regression that re-reads
+		// config mid-rebuild (or feeds a mismatched snapshot pair) must
+		// degrade to skipped members with a log — like the other member
+		// violations — never a nil-deref that takes down the engine:
+		// nothing recovers panics on this path.
+		bp, ok := r.pools[p.ID]
+		if !ok || bp == nil {
+			log.Printf("router: pool %s has chain members but was not built; skipping its members", p.ID)
+			continue
+		}
+		for _, chainID := range p.ChainIDs {
+			spec, ok := chainSpecs[chainID]
+			if !ok || len(spec.Layers) == 0 {
+				log.Printf("router: pool %s chain member %s: chain missing or empty; skipping member", p.ID, chainID)
+				continue
+			}
+			hops := make([]core.Outbound, 0, len(spec.Layers))
+			eligible := true
+			for _, ref := range spec.Layers {
+				if _, shadowed := r.pools[ref]; shadowed {
+					log.Printf("router: pool %s chain member %s: layer %s is a pool (members must be pinned outbounds); skipping member", p.ID, chainID, ref)
+					eligible = false
+					break
+				}
+				o, ok := r.outbounds[ref]
+				if !ok {
+					log.Printf("router: pool %s chain member %s: layer %s is not a built outbound; skipping member", p.ID, chainID, ref)
+					eligible = false
+					break
+				}
+				hops = append(hops, o)
+			}
+			if !eligible {
+				continue
+			}
+			bp.outbounds = append(bp.outbounds, &chainMember{
+				id:           chainID,
+				hops:         hops,
+				firstHopID:   hops[0].ID(),
+				firstHopAddr: hops[0].Address(),
+				exit:         hops[len(hops)-1],
+				ms:           r.metrics,
+			})
+		}
+	}
 }
 
 // resolveRoute materializes a policy into a fully dialable chain: a named
@@ -482,15 +611,25 @@ func (r *Router) Bridge(inbound, upstream net.Conn, meta core.Metadata) {
 func (r *Router) dialChain(ctx context.Context, chain core.Chain, meta core.Metadata) (net.Conn, []string, error) {
 	// Snapshot each layer's candidates + selector under the lock.
 	layers := make([]snapshottedLayer, len(chain))
+	hasMember := false
 	r.mu.RLock()
 	for i, layer := range chain {
 		pool := r.layerPool(layer)
 		cands := make([]core.Outbound, len(pool))
 		copy(cands, pool)
+		for _, o := range cands {
+			if _, ok := o.(*chainMember); ok {
+				hasMember = true
+			}
+		}
 		layers[i] = snapshottedLayer{filters: layer.Filters, selector: layer.Selector, pool: cands}
 	}
 	r.mu.RUnlock()
 
+	if hasMember {
+		// A layer can pick a chain member: selection expands it into hops.
+		return r.dialLayersExpanding(ctx, layers, meta)
+	}
 	return r.dialLayers(ctx, layers, meta)
 }
 
@@ -533,6 +672,74 @@ func (r *Router) dialLayers(ctx context.Context, layers []snapshottedLayer, meta
 			return nil, chainIDs, fmt.Errorf("router: layer %d select: %w", i, err)
 		}
 		hops[i] = out
+	}
+
+	return r.dialHops(ctx, hops, meta)
+}
+
+// dialLayersExpanding is dialLayers for chains whose layers can pick a chain
+// member (a pool with ChainIDs). Selection works the same — every hop is
+// chosen before the first dial — but picking a *chainMember splices its
+// pre-pinned hops into the layer list as fixed layers and re-processes the
+// position, so each expanded hop goes through the same select machinery and
+// the entry hop keeps its reachability narrowing until the first real hop is
+// selected. The splice budget bounds expansions: member hops are pinned
+// outbounds by construction (rebuild verifies it), so a member expanding into
+// another member means a cyclic reference smuggled past validation.
+//
+// Dials happen outside the router lock, per dialChain's comment.
+func (r *Router) dialLayersExpanding(ctx context.Context, layers []snapshottedLayer, meta core.Metadata) (net.Conn, []string, error) {
+	// Work on a private copy: expansion splices layers in place.
+	layers = append([]snapshottedLayer(nil), layers...)
+	var hops []core.Outbound
+	chainIDs := make([]string, 0, len(layers))
+	selectedAny := false
+	splices := 0
+	for i := 0; i < len(layers); i++ {
+		sl := layers[i]
+		pool := sl.pool
+		if len(pool) == 0 {
+			return nil, chainIDs, fmt.Errorf("router: layer %d empty pool", i)
+		}
+		if !selectedAny {
+			// The first real hop rides the local network: drop candidates
+			// whose latest measured verdict says the server is unreachable
+			// from here (chain members key on their entry hop). Fail-open
+			// when nothing has been measured yet.
+			pool = r.reachableCandidates(pool)
+			if len(pool) == 0 {
+				return nil, chainIDs, fmt.Errorf("router: layer %d no reachable outbound (local reachability probes failed)", i)
+			}
+		}
+		filtered := applyFilters(sl.filters, pool, meta)
+		if len(filtered) == 0 {
+			return nil, chainIDs, fmt.Errorf("router: layer %d no outbound passed filters", i)
+		}
+		out, err := sl.selector.Pick(filtered, meta)
+		if err != nil {
+			return nil, chainIDs, fmt.Errorf("router: layer %d select: %w", i, err)
+		}
+		if cm, ok := out.(*chainMember); ok {
+			splices++
+			if splices > 8 {
+				return nil, chainIDs, fmt.Errorf("router: layer %d expanded more than 8 chain members (cyclic pool/chain reference?)", i)
+			}
+			expanded := make([]snapshottedLayer, 0, len(layers)-1+len(cm.hops))
+			expanded = append(expanded, layers[:i]...)
+			for _, h := range cm.hops {
+				expanded = append(expanded, snapshottedLayer{
+					selector: &poolSelector{Selector: &fixedSelector{out: h}, pool: []core.Outbound{h}},
+					pool:     []core.Outbound{h},
+				})
+			}
+			expanded = append(expanded, layers[i+1:]...)
+			layers = expanded
+			i-- // re-process this position: it now holds the member's first hop
+			continue
+		}
+		hops = append(hops, out)
+		chainIDs = append(chainIDs, out.ID())
+		selectedAny = true
 	}
 
 	return r.dialHops(ctx, hops, meta)
