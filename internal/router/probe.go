@@ -1,8 +1,8 @@
 // Reachability probing of outbound proxy servers.
 //
 // The local network can often reach only some of the configured proxy
-// servers directly — an ISP may block the rest. Rather than hiding a relay
-// ("access") pool in the config model, the prober measures reachability and
+// servers directly — an ISP may block the rest. Rather than a hidden relay
+// pool in the config model, the prober measures reachability and
 // records it where every other measurement lives: the outbound metrics. Each
 // round dials every outbound's server from the engine stack and records a
 // metric row whose Chain is [core.HopLocal, outboundID] and whose Target is

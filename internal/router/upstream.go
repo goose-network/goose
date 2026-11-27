@@ -187,7 +187,7 @@ func (r *Router) dialUpstream(ctx context.Context, route string, meta core.Metad
 }
 
 // dialUpstreamChain traverses a named chain: the router's own dialChain
-// semantics, so each layer's filters, selector, and access narrowing apply,
+// semantics, so each layer's filters, selector, and reachability narrowing apply,
 // hop i tunnels toward hop i+1's proxy-server address, and the final hop
 // connects toward the fetch target.
 func (r *Router) dialUpstreamChain(ctx context.Context, id string, meta core.Metadata) (net.Conn, error) {

@@ -115,7 +115,7 @@ func socks5Server(t *testing.T) string {
 //
 // The engine's stack blocks X's address when blocked=true, so X is reachable
 // only through R — via an explicit chain, the way the config model expresses
-// it now that no hidden access pool exists.
+// it: there is no hidden relay pool.
 type reachFixture struct {
 	echo   *echoServer
 	router *Router
@@ -242,7 +242,7 @@ func TestReachabilityDropsBlockedFirstHop(t *testing.T) {
 }
 
 // TestReachabilityExplicitChainReachesBlocked verifies the config-model
-// replacement for the hidden access pool: the blocked server is reached
+// way to reach a blocked server without any hidden relay pool: it is reached
 // through an explicit chain (relay then work), and the failed local verdict
 // for work does not drop it from hop 1 — that hop rides hop 0's tunnel, not
 // the local network.

@@ -10,7 +10,7 @@
 // NOT persisted (they are regenerated from the provider specs on the next
 // poll — a persisted copy would go stale as the server list changes), and
 // provider-managed pools are persisted without their OutboundIDs: the pool
-// object itself (and the operator's Filters/Selector/Access tuning) is
+// object itself (and the operator's Filters/Selector tuning) is
 // operator state, its membership is provider output.
 
 package config
@@ -41,7 +41,7 @@ type Doc struct {
 // Snapshot returns the persistable document under one lock: the engine
 // config plus every operator object, sorted by ID so consecutive snapshots
 // diff cleanly. Provider-managed outbounds are skipped, and provider-managed
-// pools keep their id/filters/selector/access but drop OutboundIDs (see the
+// pools keep their id/filters/selector but drop OutboundIDs (see the
 // package comment).
 func (s *Store) Snapshot() Doc {
 	s.mu.RLock()

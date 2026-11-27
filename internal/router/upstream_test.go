@@ -320,13 +320,12 @@ func TestOutboundUpstreamDialerInjection(t *testing.T) {
 	require.Nil(t, r.OutboundUpstreamDialer(""), "empty outbound-level route must not produce a dialer")
 }
 
-// TestOutboundUpstreamDialerAccessIsBareID: the retired "access" form is now
-// just a bare id — resolved as a pool when one exists, else an outbound — so
-// with neither configured it errors as an unknown reference instead of
-// carrying special semantics.
-func TestOutboundUpstreamDialerAccessIsBareID(t *testing.T) {
+// TestOutboundUpstreamDialerUnknownBareID: a bare id resolves as a pool when
+// one exists, else an outbound — with neither configured it errors as an
+// unknown reference; no id carries special fallback semantics.
+func TestOutboundUpstreamDialerUnknownBareID(t *testing.T) {
 	r, _ := testRouter(t, nil, nil, nil, nil)
-	d := r.OutboundUpstreamDialer("access")
+	d := r.OutboundUpstreamDialer("ghost")
 	require.NotNil(t, d)
 	_, err := d.DialUpstream(context.Background(), "tcp", "example.com:443")
 	require.ErrorContains(t, err, "not configured")
