@@ -1,6 +1,8 @@
 package core
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -125,5 +127,29 @@ func TestFullProbeCloneIndependent(t *testing.T) {
 	}
 	if j.State != FullProbeRunning {
 		t.Errorf("clone shares State")
+	}
+}
+
+func TestFullProbeRowsPrunedField(t *testing.T) {
+	// The additive flag must stay invisible on unpruned jobs: their JSON is
+	// byte-identical to before the field existed.
+	j := &FullProbeJob{ID: "fp-1", State: FullProbeDone}
+	unmarked, err := json.Marshal(j)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(unmarked), "rows_pruned") {
+		t.Errorf("unpruned job JSON must omit rows_pruned: %s", unmarked)
+	}
+	j.RowsPruned = true
+	marked, err := json.Marshal(j)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(marked), `"rows_pruned":true`) {
+		t.Errorf("pruned job JSON must carry rows_pruned: %s", marked)
+	}
+	if c := j.Clone(); !c.RowsPruned {
+		t.Errorf("Clone must carry RowsPruned")
 	}
 }

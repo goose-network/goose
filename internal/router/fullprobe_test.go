@@ -232,6 +232,7 @@ func TestFullProbeRunningJobLimit(t *testing.T) {
 		awaitFullProbe(t, f.router, id)
 	}
 }
+
 // TestFullProbeEvictsFinishedJobs asserts finished jobs leave the live map
 // (their durable snapshot serves GET/list from then on): otherwise every
 // sweep's full result set accumulates in memory for the engine's lifetime.
