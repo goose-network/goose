@@ -1537,6 +1537,120 @@
                 }
             }
         },
+        "/api/probes/full/{id}": {
+            "get": {
+                "description": "Returns one job's current snapshot: spec, state (running/done/canceled/error), per-level progress and results, and the total attempt count. While the job runs the snapshot is live; after it finishes the durable history serves it.\nStops a running job's issuance; in-flight attempts finish under their own timeouts and the job lands in state \"canceled\" with the levels it completed. A job that already finished answers 409.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "probes",
+                    "probes"
+                ],
+                "summary": "Cancel a full active probing job",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Job id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Job id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/core.FullProbeJob"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Returns one job's current snapshot: spec, state (running/done/canceled/error), per-level progress and results, and the total attempt count. While the job runs the snapshot is live; after it finishes the durable history serves it.\nStops a running job's issuance; in-flight attempts finish under their own timeouts and the job lands in state \"canceled\" with the levels it completed. A job that already finished answers 409.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "probes",
+                    "probes"
+                ],
+                "summary": "Cancel a full active probing job",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Job id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Job id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/core.FullProbeJob"
+                        }
+                    },
+                    "204": {
+                        "description": "No content"
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/probes/full/{id}/inbounds": {
             "post": {
                 "description": "Turns the job's successful paths into chains + inbounds in the live config: one chain per path (its hops as pinned outbound layers) and one inbound listener routed through it. With no body (or no paths given) the fastest successful path per depth is applied — local→A, local→A→C, local→A→C→E, ...; naming paths explicitly applies exactly those (each must be one of the job's successful paths). protocol defaults to socks5, listen_prefix to 127.0.0.1; port names the first port (each further inbound takes the next), and port 0 picks a free port per inbound. Changes apply live: the engine starts the listeners on the next config version bump.",
@@ -2190,7 +2304,7 @@
                     "type": "string"
                 },
                 "timeout_seconds": {
-                    "description": "TimeoutSec bounds one attempt. Default 10; capped at 60.",
+                    "description": "TimeoutSec bounds one attempt. Default 10; must be 0..60 (0 = default).",
                     "type": "integer"
                 }
             }

@@ -41,7 +41,7 @@ type fullProbeRunRequest struct {
 	Headers map[string]string `json:"headers,omitempty"`
 	// Body is the request body, sent verbatim.
 	Body string `json:"body,omitempty"`
-	// TimeoutSec bounds one attempt. Default 10; capped at 60.
+	// TimeoutSec bounds one attempt. Default 10; must be 0..60 (0 = default).
 	TimeoutSec int `json:"timeout_seconds,omitempty"`
 	// MaxDepth is the deepest chain length to explore (1..5). Default 5.
 	MaxDepth int `json:"max_depth,omitempty"`
@@ -70,8 +70,29 @@ func (s *Server) fullProbes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// fullProbeItem dispatches /api/probes/full/{id} (GET snapshot, DELETE
-// cancel) and /api/probes/full/{id}/inbounds (POST apply).
+// getFullProbe godoc
+//
+//	@Summary      Get a full active probing job
+//	@Description  Returns one job's current snapshot: spec, state (running/done/canceled/error), per-level progress and results, and the total attempt count. While the job runs the snapshot is live; after it finishes the durable history serves it.
+//	@Tags         probes
+//	@Produce      json
+//	@Param        id path string true "Job id"
+//	@Success      200 {object} core.FullProbeJob
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Router       /api/probes/full/{id} [get]
+//
+// cancelFullProbe godoc
+//
+//	@Summary      Cancel a full active probing job
+//	@Description  Stops a running job's issuance; in-flight attempts finish under their own timeouts and the job lands in state "canceled" with the levels it completed. A job that already finished answers 409.
+//	@Tags         probes
+//	@Param        id path string true "Job id"
+//	@Success      204 "No content"
+//	@Failure      401 {object} errResponse
+//	@Failure      404 {object} errResponse
+//	@Failure      409 {object} errResponse
+//	@Router       /api/probes/full/{id} [delete]
 func (s *Server) fullProbeItem(w http.ResponseWriter, r *http.Request) {
 	id := resourceID(r.URL.Path, "/api/probes/full")
 	if rest, ok := strings.CutSuffix(id, "/inbounds"); ok {
@@ -145,6 +166,13 @@ func (s *Server) fullProbeStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 		return
 	}
+	// Bound the seconds before scaling to nanoseconds: an unbounded int
+	// times time.Second wraps int64, and a wrapped positive value under 60s
+	// would slip past NormalizeFullProbeSpec's cap as a tiny timeout.
+	if req.TimeoutSec < 0 || req.TimeoutSec > int(core.FullProbeMaxTimeout/time.Second) {
+		writeJSON(w, errResponse{"timeout_seconds out of range"}, http.StatusBadRequest)
+		return
+	}
 	spec := core.FullProbeSpec{
 		Target:              req.Target,
 		Method:              req.Method,
@@ -198,30 +226,6 @@ func (s *Server) fullProbeList(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, out, http.StatusOK)
 }
-
-// getFullProbe godoc
-//
-//	@Summary      Get a full active probing job
-//	@Description  Returns one job's current snapshot: spec, state (running/done/canceled/error), per-level progress and results, and the total attempt count. While the job runs the snapshot is live; after it finishes the durable history serves it.
-//	@Tags         probes
-//	@Produce      json
-//	@Param        id path string true "Job id"
-//	@Success      200 {object} core.FullProbeJob
-//	@Failure      401 {object} errResponse
-//	@Failure      404 {object} errResponse
-//	@Router       /api/probes/full/{id} [get]
-//
-// cancelFullProbe godoc
-//
-//	@Summary      Cancel a full active probing job
-//	@Description  Stops a running job's issuance; in-flight attempts finish under their own timeouts and the job lands in state "canceled" with the levels it completed. A job that already finished answers 409.
-//	@Tags         probes
-//	@Param        id path string true "Job id"
-//	@Success      204 "No content"
-//	@Failure      401 {object} errResponse
-//	@Failure      404 {object} errResponse
-//	@Failure      409 {object} errResponse
-//	@Router       /api/probes/full/{id} [delete]
 
 // fullProbeApplyResponse is the body of POST /api/probes/full/{id}/inbounds.
 type fullProbeApplyResponse struct {

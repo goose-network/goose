@@ -127,6 +127,16 @@ func TestEngineFullProbeApplyRoutesTraffic(t *testing.T) {
 	t.Cleanup(func() { e.Close() })
 	require.NoError(t, e.StartAPI())
 	base := "http://" + apiAddr
+	// StartAPI serves asynchronously: wait for the bind before the first
+	// request, or a slow listen under -race load answers connection refused.
+	waitFor(t, 5*time.Second, func() bool {
+		c, err := net.DialTimeout("tcp", apiAddr, 200*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		_ = c.Close()
+		return true
+	})
 
 	// Step 1+2: set the target and start the full active probing job.
 	code, body := fpAPI(t, "POST", base+"/api/probes/full", map[string]any{

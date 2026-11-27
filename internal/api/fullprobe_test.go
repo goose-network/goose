@@ -175,6 +175,15 @@ func TestFullProbeStartRejections(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, code, "unwired runner")
 	code, _ = do(t, hs, "PUT", "/api/probes/full", "", nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, code)
+
+	// timeout_seconds is bounded before the nanosecond scaling: a huge value
+	// would wrap int64 and could land under the 60s cap as a tiny timeout.
+	code, _ = do(t, hs, "POST", "/api/probes/full", "", map[string]any{"target": "http://x.com", "timeout_seconds": 1 << 40})
+	assert.Equal(t, http.StatusBadRequest, code, "overflowing timeout_seconds")
+	code, _ = do(t, hs, "POST", "/api/probes/full", "", map[string]any{"target": "http://x.com", "timeout_seconds": -5})
+	assert.Equal(t, http.StatusBadRequest, code, "negative timeout_seconds")
+	code, _ = do(t, hs, "POST", "/api/probes/full", "", map[string]any{"target": "http://x.com", "timeout_seconds": 61})
+	assert.Equal(t, http.StatusBadRequest, code, "timeout_seconds past the cap")
 }
 
 // TestFullProbeGetListCancel covers the job views: GET serves the live
