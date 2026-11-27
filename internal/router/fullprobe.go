@@ -19,6 +19,7 @@ package router
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"sort"
@@ -91,7 +92,7 @@ func (r *Router) StartFullProbe(spec core.FullProbeSpec) (*core.FullProbeJob, er
 	}
 	if running >= core.FullProbeMaxRunningJobs {
 		r.fullProbeMu.Unlock()
-		return nil, fmt.Errorf("full probe: %d jobs already running (limit %d)", running, core.FullProbeMaxRunningJobs)
+		return nil, fmt.Errorf("%w (%d running, limit %d)", core.ErrFullProbeCapacity, running, core.FullProbeMaxRunningJobs)
 	}
 	id := fmt.Sprintf("fp-%d-%d", time.Now().UnixNano(), fullProbeSeq.Add(1))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -112,13 +113,24 @@ func (r *Router) StartFullProbe(spec core.FullProbeSpec) (*core.FullProbeJob, er
 	go func() {
 		defer r.fullProbeWG.Done()
 		defer close(fp.done)
-		r.runFullProbe(ctx, fp, outs)
+		err := r.runFullProbe(ctx, fp, outs)
+		r.fullProbeMu.Lock()
+		if err == nil {
+			// The terminal snapshot is durable; drop the live copy so
+			// finished jobs do not accumulate in memory. GET/list serve
+			// the finished job from the durable history from here on.
+			delete(r.fullProbes, id)
+		}
+		// On a failed terminal persist keep the live copy: evicting would
+		// expose the last "running" progress snapshot forever. done still
+		// closes (the runner exited), so it no longer counts as running.
+		r.fullProbeMu.Unlock()
 	}()
 	return fp.snapshot(), nil
 }
 
-// FullProbeJob returns one job's current state: the live copy while it runs
-// (or after, until the engine restarts), else the durable snapshot.
+// FullProbeJob returns one job's current state: the live copy while it runs,
+// else the durable snapshot (finished jobs are evicted from the live map).
 func (r *Router) FullProbeJob(id string) (*core.FullProbeJob, bool) {
 	r.fullProbeMu.Lock()
 	fp := r.fullProbes[id]
@@ -160,7 +172,10 @@ func (r *Router) FullProbeJobs(n int) []*core.FullProbeJob {
 
 // CancelFullProbe stops a running job's issuance; in-flight attempts finish
 // under their own timeouts and the job lands in state "canceled". It reports
-// whether a running job was found.
+// whether a running job was found. A job whose runner has exited (done
+// closed) or whose snapshot is already terminal is not cancelable — checked
+// by state, not just liveness, so the window between the durable terminal
+// write and the live-map eviction cannot report a stale "running".
 func (r *Router) CancelFullProbe(id string) bool {
 	r.fullProbeMu.Lock()
 	fp := r.fullProbes[id]
@@ -168,10 +183,20 @@ func (r *Router) CancelFullProbe(id string) bool {
 	if fp == nil {
 		return false
 	}
+	// Check and cancel under the run lock: the runner stores its terminal
+	// state under the same lock and re-checks ctx.Err() there, so a true
+	// return guarantees the job lands canceled, and a job that already
+	// stored a terminal state returns false. fp.cancel only signals the
+	// context — it never takes the run lock, so holding it here is safe.
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
 	select {
 	case <-fp.done:
 		return false
 	default:
+	}
+	if fp.job.State != core.FullProbeRunning {
+		return false
 	}
 	fp.cancel()
 	return true
@@ -216,7 +241,9 @@ type fullProbeAttempt struct {
 
 // runFullProbe drives one job's level loop. It owns fp.job's mutations under
 // fp.mu and persists progress snapshots at ~1/s plus every level boundary.
-func (r *Router) runFullProbe(ctx context.Context, fp *fullProbeRun, outs []core.Outbound) {
+// It returns the terminal persist's error: nil means the finished job is
+// durable and its live copy can be evicted.
+func (r *Router) runFullProbe(ctx context.Context, fp *fullProbeRun, outs []core.Outbound) error {
 	spec := fp.job.Spec
 	byID := make(map[string]core.Outbound, len(outs))
 	for _, o := range outs {
@@ -325,11 +352,18 @@ func (r *Router) runFullProbe(ctx context.Context, fp *fullProbeRun, outs []core
 		prefixes, candidates = nextPrefixes, nextCandidates
 	}
 
+	// Re-check cancellation under the same lock that stores the terminal
+	// state: a cancel arriving after the loop's last ctx check but before
+	// this store must still land as canceled — CancelFullProbe returned 204
+	// under fp.mu, so the state it observed running has to become canceled.
 	fp.mu.Lock()
+	if ctx.Err() != nil {
+		state = core.FullProbeCanceled
+	}
 	fp.job.State = state
 	fp.job.FinishedAt = time.Now()
 	fp.mu.Unlock()
-	r.persistFullProbe(fp, true)
+	return r.persistFullProbe(fp, true)
 }
 
 // fullProbeResolvable reports whether every hop of prefix+cand still exists
@@ -530,18 +564,25 @@ func (r *Router) fullProbeOne(ctx context.Context, spec core.FullProbeSpec, a fu
 	return res
 }
 
-// persistFullProbe enqueues a job snapshot for durable storage: always when
-// force (level boundaries, completion), otherwise at most ~1/s so a 10000 rps
-// sweep does not enqueue one snapshot per attempt.
-func (r *Router) persistFullProbe(fp *fullProbeRun, force bool) {
+// persistFullProbe persists a job snapshot: always when force (level
+// boundaries, completion), otherwise at most ~1/s so a 10000 rps sweep does
+// not enqueue one snapshot per attempt. Progress snapshots ride the lossy
+// batched pipeline; the terminal snapshot is written synchronously by the
+// store. It returns the store's error (nil when throttled), so the runner
+// can keep the live copy if the terminal record failed to land.
+func (r *Router) persistFullProbe(fp *fullProbeRun, force bool) error {
 	fp.mu.Lock()
 	now := time.Now()
 	if !force && now.Sub(fp.lastPersist) < time.Second {
 		fp.mu.Unlock()
-		return
+		return nil
 	}
 	fp.lastPersist = now
 	snap := fp.job.Clone()
 	fp.mu.Unlock()
-	_ = r.metrics.RecordFullProbeJob(snap)
+	err := r.metrics.RecordFullProbeJob(snap)
+	if err != nil && snap.State != core.FullProbeRunning {
+		log.Printf("router: full probe %s: persist terminal snapshot: %v", snap.ID, err)
+	}
+	return err
 }

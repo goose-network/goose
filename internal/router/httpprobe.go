@@ -453,7 +453,10 @@ func assembleProbe(spec core.HTTPProbeSpec, target, route string, start time.Tim
 		method = http.MethodGet
 	}
 	p := core.HTTPProbe{
-		ID:        fmt.Sprintf("%d-%s", start.UnixNano(), route),
+		// Target is part of the ID: concurrent probes of the same route to
+		// different targets can share a start nanosecond, and the metrics
+		// key (start-ns + ID) would otherwise collapse them into one row.
+		ID:        fmt.Sprintf("%d-%s-%s", start.UnixNano(), route, target),
 		Route:     route,
 		Target:    target,
 		Method:    method,

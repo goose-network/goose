@@ -1481,7 +1481,7 @@
                 }
             },
             "post": {
-                "description": "Launches a multi-level sweep that discovers which proxy paths reach the target: level 1 probes local → every outbound (successes A, failures B); level 2 probes local → a → b for every a ∈ A, b ∈ B (successes C, failures D); level 3 extends the surviving paths with the new failures, and so on up to max_depth (5). Every attempt is a real HTTP request through the pinned path, so a success proves the whole chain proxies. The job runs detached; poll GET /api/probes/full/{id} for per-level progress and success paths, then POST /api/probes/full/{id}/inbounds to turn them into chains + inbounds. rps caps the probe request rate (up to 10000); concurrency, max_attempts_per_level, max_paths_per_level (the beam of fastest paths kept per level) and max_total_attempts bound the fan-out.",
+                "description": "Launches a multi-level sweep that discovers which proxy paths reach the target: level 1 probes local → every outbound (successes A, failures B); level 2 probes local → a → b for every a ∈ A, b ∈ B (successes C, failures D); level 3 extends the surviving paths with the new failures, and so on up to max_depth (5). Every attempt is a real HTTP request through the pinned path, so a success proves the whole chain proxies. The job runs detached; poll GET /api/probes/full/{id} for per-level progress and success paths, then POST /api/probes/full/{id}/inbounds to turn them into chains + inbounds. rps caps the probe request rate (up to 10000); concurrency, max_attempts_per_level, max_paths_per_level (the beam of fastest paths kept per level) and max_total_attempts bound the fan-out. At most two sweeps run at once; a start beyond that answers 409 until one finishes.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1524,6 +1524,12 @@
                     },
                     "405": {
                         "description": "Method Not Allowed",
+                        "schema": {
+                            "$ref": "#/definitions/api.errResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
                         "schema": {
                             "$ref": "#/definitions/api.errResponse"
                         }
@@ -1653,7 +1659,7 @@
         },
         "/api/probes/full/{id}/inbounds": {
             "post": {
-                "description": "Turns the job's successful paths into chains + inbounds in the live config: one chain per path (its hops as pinned outbound layers) and one inbound listener routed through it. With no body (or no paths given) the fastest successful path per depth is applied — local→A, local→A→C, local→A→C→E, ...; naming paths explicitly applies exactly those (each must be one of the job's successful paths). protocol defaults to socks5, listen_prefix to 127.0.0.1; port names the first port (each further inbound takes the next), and port 0 picks a free port per inbound. Changes apply live: the engine starts the listeners on the next config version bump.",
+                "description": "Turns the job's successful paths into chains + inbounds in the live config: one chain per path (its hops as pinned outbound layers) and one inbound listener routed through it. With no body (or no paths given) the fastest successful path per depth is applied — local→A, local→A→C, local→A→C→E, ...; naming paths explicitly applies exactly those (each must be one of the job's successful paths, at most 64 per call). Every hop must still exist as an outbound and must not be shadowed by a pool of the same name (routing resolves pools first). protocol defaults to socks5, listen_prefix to 127.0.0.1; port names the first port (each further inbound takes the next, and must be bindable), and port 0 picks a free port per inbound. Changes apply live: the engine starts the listeners on the next config version bump.",
                 "consumes": [
                     "application/json"
                 ],

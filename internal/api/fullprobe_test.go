@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -371,4 +373,80 @@ func TestFullProbeApplyNoPaths(t *testing.T) {
 	hs, _, _ := newFullProbeServer(t, fr)
 	code, body := do(t, hs, "POST", "/api/probes/full/fp-test/inbounds", "", nil)
 	assert.Equal(t, http.StatusBadRequest, code, string(body))
+}
+
+// TestFullProbeStartCapacityConflict asserts the running-job-limit rejection
+// answers 409 (transient conflict), not 400 (bad spec).
+func TestFullProbeStartCapacityConflict(t *testing.T) {
+	fr := &fakeFullRunner{err: fmt.Errorf("%w (2 running, limit 2)", core.ErrFullProbeCapacity)}
+	hs, _, _ := newFullProbeServer(t, fr)
+	code, body := do(t, hs, "POST", "/api/probes/full", "", map[string]any{"target": "http://x.com"})
+	assert.Equal(t, http.StatusConflict, code, string(body))
+}
+
+// TestFullProbeApplyPoolShadow asserts a hop that is also a pool id is
+// refused: routing resolves pools first, so the generated chain would ride
+// the pool, not the proved outbound.
+func TestFullProbeApplyPoolShadow(t *testing.T) {
+	fr := &fakeFullRunner{}
+	fr.set(finishedJob())
+	hs, cfg, _ := newFullProbeServer(t, fr)
+	cfg.SetPool(&config.Pool{ID: "relay", OutboundIDs: []string{"work"}, Selector: config.SelectorSpec{Type: "random"}})
+	code, body := do(t, hs, "POST", "/api/probes/full/fp-test/inbounds", "", nil)
+	assert.Equal(t, http.StatusBadRequest, code, string(body))
+	assert.Empty(t, cfg.Chains(), "a pool-shadowed apply must not write config")
+}
+
+// TestFullProbeApplyPathCap asserts an explicit selection larger than the
+// per-apply cap is refused before any config write.
+func TestFullProbeApplyPathCap(t *testing.T) {
+	fr := &fakeFullRunner{}
+	fr.set(finishedJob())
+	hs, cfg, _ := newFullProbeServer(t, fr)
+	paths := make([][]string, core.FullProbeMaxApplyPaths+1)
+	for i := range paths {
+		paths[i] = []string{"relay"}
+	}
+	code, body := do(t, hs, "POST", "/api/probes/full/fp-test/inbounds", "", map[string]any{"paths": paths})
+	assert.Equal(t, http.StatusBadRequest, code, string(body))
+	assert.Empty(t, cfg.Chains())
+}
+
+// TestFullProbeApplyPortCollision asserts an explicit port already bound by
+// a live listener is refused (409), not silently written as a dead inbound.
+func TestFullProbeApplyPortCollision(t *testing.T) {
+	fr := &fakeFullRunner{}
+	fr.set(finishedJob())
+	hs, cfg, _ := newFullProbeServer(t, fr)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+	code, body := do(t, hs, "POST", "/api/probes/full/fp-test/inbounds", "", map[string]any{
+		"paths": [][]string{{"relay"}}, "port": port,
+	})
+	assert.Equal(t, http.StatusConflict, code, string(body))
+	assert.Empty(t, cfg.Chains())
+}
+
+// TestFullProbeApplyPortBadAddress verifies a permanent bind failure (a
+// non-local listen address) answers 400, not 409: only an address-in-use
+// collision is a retryable conflict, matching the auto-port branch.
+func TestFullProbeApplyPortBadAddress(t *testing.T) {
+	// On hosts with ip_nonlocal_bind (or transparent-proxy setups) even a
+	// TEST-NET address binds fine, so probe bindability first and skip
+	// rather than flake.
+	probe, err := net.Listen("tcp", "203.0.113.1:0")
+	if err == nil {
+		probe.Close()
+		t.Skip("host allows binding non-local addresses")
+	}
+	fr := &fakeFullRunner{}
+	fr.set(finishedJob())
+	hs, cfg, _ := newFullProbeServer(t, fr)
+	code, body := do(t, hs, "POST", "/api/probes/full/fp-test/inbounds", "", map[string]any{
+		"paths": [][]string{{"relay"}}, "listen_prefix": "203.0.113.1", "port": 18080,
+	})
+	assert.Equal(t, http.StatusBadRequest, code, string(body))
+	assert.Empty(t, cfg.Chains())
 }

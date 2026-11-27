@@ -21,9 +21,15 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrFullProbeCapacity marks a start rejected because too many jobs are
+// already running — a transient conflict (retry when one finishes), not a
+// bad spec, so the API answers 409 rather than 400.
+var ErrFullProbeCapacity = errors.New("full probe: too many jobs already running")
 
 // Full probe job states.
 const (
@@ -57,6 +63,10 @@ const (
 	FullProbeMaxTimeout = 60 * time.Second
 	// FullProbeMaxRunningJobs caps concurrently running jobs per engine.
 	FullProbeMaxRunningJobs = 2
+	// FullProbeMaxApplyPaths caps how many paths one apply call turns into
+	// chains + inbounds. Each path becomes a live listener; an unbounded
+	// explicit selection could mint thousands of them in one request.
+	FullProbeMaxApplyPaths = 64
 
 	// Defaults for an omitted spec field.
 	DefaultFullProbeDepth            = 5

@@ -222,7 +222,10 @@ func (e *Engine) reconcile() {
 		}
 		ln, err := inbound.New(in.ID, in.Protocol, in.Listen, auth, resolve, e.router)
 		if err != nil {
-			continue // log in real impl; keep engine running
+			// Keep the engine running, but say so: a silently skipped
+			// listener reads as a live inbound that never answers.
+			log.Printf("engine: inbound %s (%s %s) failed to start: %v", in.ID, in.Protocol, in.Listen, err)
+			continue
 		}
 		e.listeners[id] = &listenerEntry{Listener: ln, sig: inboundSignature(in)}
 	}

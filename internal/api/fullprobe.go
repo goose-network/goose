@@ -6,10 +6,12 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/goose-network/goose/internal/config"
@@ -145,7 +147,7 @@ func (s *Server) fullProbeJob(id string) (*core.FullProbeJob, bool) {
 // startFullProbe godoc
 //
 //	@Summary      Start a full active probing job
-//	@Description  Launches a multi-level sweep that discovers which proxy paths reach the target: level 1 probes local → every outbound (successes A, failures B); level 2 probes local → a → b for every a ∈ A, b ∈ B (successes C, failures D); level 3 extends the surviving paths with the new failures, and so on up to max_depth (5). Every attempt is a real HTTP request through the pinned path, so a success proves the whole chain proxies. The job runs detached; poll GET /api/probes/full/{id} for per-level progress and success paths, then POST /api/probes/full/{id}/inbounds to turn them into chains + inbounds. rps caps the probe request rate (up to 10000); concurrency, max_attempts_per_level, max_paths_per_level (the beam of fastest paths kept per level) and max_total_attempts bound the fan-out.
+//	@Description  Launches a multi-level sweep that discovers which proxy paths reach the target: level 1 probes local → every outbound (successes A, failures B); level 2 probes local → a → b for every a ∈ A, b ∈ B (successes C, failures D); level 3 extends the surviving paths with the new failures, and so on up to max_depth (5). Every attempt is a real HTTP request through the pinned path, so a success proves the whole chain proxies. The job runs detached; poll GET /api/probes/full/{id} for per-level progress and success paths, then POST /api/probes/full/{id}/inbounds to turn them into chains + inbounds. rps caps the probe request rate (up to 10000); concurrency, max_attempts_per_level, max_paths_per_level (the beam of fastest paths kept per level) and max_total_attempts bound the fan-out. At most two sweeps run at once; a start beyond that answers 409 until one finishes.
 //	@Tags         probes
 //	@Accept       json
 //	@Produce      json
@@ -154,6 +156,7 @@ func (s *Server) fullProbeJob(id string) (*core.FullProbeJob, bool) {
 //	@Failure      400 {object} errResponse
 //	@Failure      401 {object} errResponse
 //	@Failure      405 {object} errResponse
+//	@Failure      409 {object} errResponse
 //	@Failure      503 {object} errResponse
 //	@Router       /api/probes/full [post]
 func (s *Server) fullProbeStart(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +191,12 @@ func (s *Server) fullProbeStart(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := s.full.StartFullProbe(spec)
 	if err != nil {
+		// Too many running jobs is a transient conflict, not a bad spec:
+		// retrying the same body once one finishes succeeds.
+		if errors.Is(err, core.ErrFullProbeCapacity) {
+			writeJSON(w, errResponse{err.Error()}, http.StatusConflict)
+			return
+		}
 		writeJSON(w, errResponse{err.Error()}, http.StatusBadRequest)
 		return
 	}
@@ -238,7 +247,7 @@ type fullProbeApplyResponse struct {
 // applyFullProbe godoc
 //
 //	@Summary      Create inbounds from a job's successful paths
-//	@Description  Turns the job's successful paths into chains + inbounds in the live config: one chain per path (its hops as pinned outbound layers) and one inbound listener routed through it. With no body (or no paths given) the fastest successful path per depth is applied — local→A, local→A→C, local→A→C→E, ...; naming paths explicitly applies exactly those (each must be one of the job's successful paths). protocol defaults to socks5, listen_prefix to 127.0.0.1; port names the first port (each further inbound takes the next), and port 0 picks a free port per inbound. Changes apply live: the engine starts the listeners on the next config version bump.
+//	@Description  Turns the job's successful paths into chains + inbounds in the live config: one chain per path (its hops as pinned outbound layers) and one inbound listener routed through it. With no body (or no paths given) the fastest successful path per depth is applied — local→A, local→A→C, local→A→C→E, ...; naming paths explicitly applies exactly those (each must be one of the job's successful paths, at most 64 per call). Every hop must still exist as an outbound and must not be shadowed by a pool of the same name (routing resolves pools first). protocol defaults to socks5, listen_prefix to 127.0.0.1; port names the first port (each further inbound takes the next, and must be bindable), and port 0 picks a free port per inbound. Changes apply live: the engine starts the listeners on the next config version bump.
 //	@Tags         probes
 //	@Accept       json
 //	@Produce      json
@@ -267,6 +276,10 @@ func (s *Server) fullProbeApply(w http.ResponseWriter, r *http.Request, id strin
 	}
 	if spec == nil {
 		spec = &core.FullProbeApplySpec{}
+	}
+	if len(spec.Paths) > core.FullProbeMaxApplyPaths {
+		writeJSON(w, errResponse{fmt.Sprintf("too many paths (%d); at most %d inbounds can be created per apply", len(spec.Paths), core.FullProbeMaxApplyPaths)}, http.StatusBadRequest)
+		return
 	}
 	paths := j.BestPaths()
 	if len(spec.Paths) > 0 {
@@ -312,14 +325,18 @@ func (s *Server) fullProbeApply(w http.ResponseWriter, r *http.Request, id strin
 		prefix = "fullprobe-" + j.ID
 	}
 
-	// Validate everything before writing anything: hops must still exist,
-	// and the generated IDs must not collide with live config.
+	// Validate everything before writing anything: hops must still exist
+	// as outbounds (a pool of the same name would shadow the hop — routing
+	// resolves pools first, rerouting traffic off the proved path), the
+	// generated IDs must not collide with live config, and every listen
+	// address must be free and unique.
 	type planned struct {
 		chainID, inboundID, listen string
 		path                       core.FullProbePath
 	}
 	var plans []planned
 	used := map[string]bool{}
+	listens := map[string]bool{}
 	for i, p := range paths {
 		if len(p.Hops) == 0 || len(p.Hops) > core.FullProbeMaxDepth {
 			writeJSON(w, errResponse{"path depth out of range"}, http.StatusBadRequest)
@@ -328,6 +345,10 @@ func (s *Server) fullProbeApply(w http.ResponseWriter, r *http.Request, id strin
 		for _, hop := range p.Hops {
 			if _, ok := s.cfg.Outbound(hop); !ok {
 				writeJSON(w, errResponse{fmt.Sprintf("outbound %q no longer exists", hop)}, http.StatusBadRequest)
+				return
+			}
+			if _, ok := s.cfg.Pool(hop); ok {
+				writeJSON(w, errResponse{fmt.Sprintf("hop %q is also a pool; routing would resolve the pool and reroute traffic off the proved path — rename the pool or the outbound", hop)}, http.StatusBadRequest)
 				return
 			}
 		}
@@ -348,18 +369,53 @@ func (s *Server) fullProbeApply(w http.ResponseWriter, r *http.Request, id strin
 				writeJSON(w, errResponse{"port range exhausted"}, http.StatusBadRequest)
 				return
 			}
-		} else {
-			fp, perr := freePort(host)
-			if perr != nil {
-				writeJSON(w, errResponse{perr.Error()}, http.StatusBadRequest)
+			// An explicit port must be bindable now: the engine's
+			// reconcile logs and skips a listener that cannot bind, so a
+			// collision here would silently produce a dead inbound.
+			if err := portFree(host, port); err != nil {
+				// Only an address-in-use collision is a transient conflict
+				// (409 — retryable once the other listener goes away).
+				// EACCES on a privileged port or a non-local listen address
+				// is a permanent bad request, matching the auto-port branch.
+				status := http.StatusBadRequest
+				if errors.Is(err, syscall.EADDRINUSE) {
+					status = http.StatusConflict
+				}
+				writeJSON(w, errResponse{fmt.Sprintf("port %d: %v", port, err)}, status)
 				return
+			}
+		} else {
+			// freePort closes its probe listener before returning, so the
+			// OS may hand out the same port twice in one apply; re-roll
+			// until every generated inbound has a distinct port.
+			var fp int
+			for tries := 0; ; tries++ {
+				var perr error
+				fp, perr = freePort(host)
+				if perr != nil {
+					writeJSON(w, errResponse{perr.Error()}, http.StatusBadRequest)
+					return
+				}
+				if !listens[net.JoinHostPort(host, fmt.Sprintf("%d", fp))] {
+					break
+				}
+				if tries >= 16 {
+					writeJSON(w, errResponse{"cannot find enough distinct free ports"}, http.StatusConflict)
+					return
+				}
 			}
 			port = fp
 		}
+		listen := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+		if listens[listen] {
+			writeJSON(w, errResponse{fmt.Sprintf("listen %s assigned twice", listen)}, http.StatusConflict)
+			return
+		}
+		listens[listen] = true
 		plans = append(plans, planned{
 			chainID:   chainID,
 			inboundID: chainID,
-			listen:    net.JoinHostPort(host, fmt.Sprintf("%d", port)),
+			listen:    listen,
 			path:      p,
 		})
 	}
@@ -386,7 +442,7 @@ func (s *Server) fullProbeApply(w http.ResponseWriter, r *http.Request, id strin
 // freePort asks the OS for a free TCP port on host by opening and closing a
 // listener, so the generated inbound config names a concrete port. The
 // usual race (another process grabbing it before the engine listens) is
-// accepted: the engine's reconcile reports a listener that cannot bind.
+// accepted: the engine's reconcile logs a listener that cannot bind.
 func freePort(host string) (int, error) {
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
@@ -394,4 +450,16 @@ func freePort(host string) (int, error) {
 	}
 	defer ln.Close()
 	return ln.Addr().(*net.TCPAddr).Port, nil
+}
+
+// portFree reports whether host:port can be bound right now, by opening and
+// closing a listener on it. Used for explicitly requested ports, where a
+// collision with a live listener must be a refusal, not a silent dead
+// inbound.
+func portFree(host string, port int) error {
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+	if err != nil {
+		return fmt.Errorf("cannot bind %s:%d: %w", host, port, err)
+	}
+	return ln.Close()
 }

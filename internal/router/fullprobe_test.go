@@ -1,6 +1,7 @@
 package router
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -226,6 +227,67 @@ func TestFullProbeRunningJobLimit(t *testing.T) {
 	}
 	_, err := f.router.StartFullProbe(spec)
 	require.Error(t, err, "running-job limit should reject a further start")
+	for _, id := range ids {
+		f.router.CancelFullProbe(id)
+		awaitFullProbe(t, f.router, id)
+	}
+}
+// TestFullProbeEvictsFinishedJobs asserts finished jobs leave the live map
+// (their durable snapshot serves GET/list from then on): otherwise every
+// sweep's full result set accumulates in memory for the engine's lifetime.
+func TestFullProbeEvictsFinishedJobs(t *testing.T) {
+	f := newReachFixture(t, true)
+	srv := probeTarget(t)
+
+	j0, err := f.router.StartFullProbe(core.FullProbeSpec{
+		Target: srv.URL, Timeout: 5 * time.Second, RPS: 1000, MaxDepth: 2,
+	})
+	require.NoError(t, err)
+	j := awaitFullProbe(t, f.router, j0.ID)
+	assert.Equal(t, core.FullProbeDone, j.State)
+
+	// The runner evicts before closing done; wait for the eviction.
+	require.Eventually(t, func() bool {
+		f.router.fullProbeMu.Lock()
+		defer f.router.fullProbeMu.Unlock()
+		_, ok := f.router.fullProbes[j0.ID]
+		return !ok
+	}, 5*time.Second, 10*time.Millisecond, "finished job never evicted from the live map")
+
+	// GET still serves the terminal state from durable history, and the
+	// list merges it without a live copy.
+	got, ok := f.router.FullProbeJob(j0.ID)
+	require.True(t, ok)
+	assert.Equal(t, core.FullProbeDone, got.State)
+	assert.Len(t, got.BestPaths(), 2)
+	list := f.router.FullProbeJobs(10)
+	require.NotEmpty(t, list)
+	assert.Equal(t, j0.ID, list[0].ID)
+	// A finished job cannot be canceled.
+	assert.False(t, f.router.CancelFullProbe(j0.ID))
+}
+
+// TestFullProbeCapacitySentinel asserts the running-job-limit rejection
+// wraps core.ErrFullProbeCapacity so the API can answer 409 (a transient
+// conflict) rather than 400 (a bad spec).
+func TestFullProbeCapacitySentinel(t *testing.T) {
+	f := newReachFixture(t, false)
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(slow.Close)
+	spec := core.FullProbeSpec{Target: slow.URL, Timeout: 2 * time.Second, RPS: 1, Concurrency: 1, MaxDepth: 1}
+
+	var ids []string
+	for i := 0; i < core.FullProbeMaxRunningJobs; i++ {
+		j, err := f.router.StartFullProbe(spec)
+		require.NoError(t, err)
+		ids = append(ids, j.ID)
+	}
+	_, err := f.router.StartFullProbe(spec)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, core.ErrFullProbeCapacity), "capacity rejection must wrap the sentinel, got: %v", err)
 	for _, id := range ids {
 		f.router.CancelFullProbe(id)
 		awaitFullProbe(t, f.router, id)
