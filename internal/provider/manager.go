@@ -38,6 +38,11 @@ import (
 // or absent.
 const pollInterval = 2 * time.Minute
 
+// PollInterval exposes the periodic re-poll cadence for cross-package
+// invariants (the router's full-probe settling tail must keep its quiet
+// window longer than this, or an inter-poll lull reads as a settled fleet).
+func PollInterval() time.Duration { return pollInterval }
+
 // Manager runs the engine's dynamic outbound providers.
 type Manager struct {
 	cfg *config.Store

@@ -7,7 +7,9 @@
 // one may succeed, and that is exactly what the sweep is looking for. Every
 // attempt is a real HTTP request through the pinned path, dialed with the
 // same dialHops machinery dispatch uses (no reachability narrowing: the
-// sweep is measuring whether the path works, not routing traffic).
+// sweep is measuring whether the path works, not routing traffic). After the
+// level loop a bounded settling tail probes outbounds that registered late
+// (provider fleets grow over minutes) at depth 1, folding them into level 1.
 //
 // Throughput: a worker pool of spec.Concurrency goroutines pulls attempts
 // through an x/time/rate limiter capped at spec.RPS (up to 10000/s).
@@ -39,6 +41,17 @@ import (
 
 // fullProbeSeq disambiguates job IDs minted in the same nanosecond.
 var fullProbeSeq atomic.Uint64
+
+// Settling-tail tuning. After the beam sweep, a job on a provider-backed
+// engine keeps probing newly registered outbounds at depth 1 until the fleet
+// has been quiet for fullProbeCatchupQuiet — longer than the provider
+// manager's 2-minute poll interval, so an inter-poll lull is not mistaken for
+// settle — or the spec's CatchupSeconds bound expires. Tests shrink both via
+// the Router's catchupTickDur/catchupQuietDur seams.
+const (
+	fullProbeCatchupQuiet = 130 * time.Second
+	fullProbeCatchupTick  = 5 * time.Second
+)
 
 // fullProbeResult is one attempt's outcome folded back into the level: a
 // successful path, or a failure keyed by the last-hop outbound that failed.
@@ -303,6 +316,15 @@ func (r *Router) runFullProbe(ctx context.Context, fp *fullProbeRun, outs []core
 	for _, o := range outs {
 		byID[o.ID()] = o
 	}
+	// tried is the depth-1 candidate universe: every outbound offered at
+	// level 1, start snapshot plus anything the settling tail takes in. It
+	// keeps the tail from probing an ID twice, and byID stays add-only so
+	// fullProbeOne's lookupOutbound→byID fallback never sees a nil hop even
+	// when an outbound is removed mid-job.
+	tried := make(map[string]bool, len(outs))
+	for _, o := range outs {
+		tried[o.ID()] = true
+	}
 
 	// prefixes are the successful paths the next level extends; candidates
 	// the failed items it retries. Depth 1 starts from the empty local prefix
@@ -406,6 +428,17 @@ func (r *Router) runFullProbe(ctx context.Context, fp *fullProbeRun, outs []core
 		prefixes, candidates = nextPrefixes, nextCandidates
 	}
 
+	// The beam measured the fleet as it was at start. Provider fleets keep
+	// growing for minutes after boot — server lists download in bursts — so
+	// ending here would report only the outbounds that existed when the job
+	// started (the 428-vs-266 depth-1 gap). The settling tail probes late
+	// arrivals at depth 1 and folds them into level 1; bounded, cancelable,
+	// and skipped for static fleets. A cancel during the tail still lands
+	// canceled via the terminal store's ctx re-check below.
+	if ctx.Err() == nil {
+		r.fullProbeTopUp(ctx, fp, spec, byID, tried)
+	}
+
 	// Re-check cancellation under the same lock that stores the terminal
 	// state: a cancel arriving after the loop's last ctx check but before
 	// this store must still land as canceled — CancelFullProbe returned 204
@@ -420,6 +453,242 @@ func (r *Router) runFullProbe(ctx context.Context, fp *fullProbeRun, outs []core
 	// Through the seam so tests can fail the first terminal write; in
 	// production this is exactly r.persistFullProbe(fp, true).
 	return r.persistFullProbeFn(fp, true)
+}
+
+// fullProbeTopUp chases outbounds registered after the sweep started. With
+// providers configured the fleet can grow for minutes (server-list downloads
+// land in bursts), so the tail keeps taking depth-1 top-up passes until the
+// fleet has been quiet for the quiet window or spec.CatchupSeconds expires.
+// Static fleets (no providers) and an opted-out tail (CatchupSeconds <= 0)
+// get exactly one final pass — enough to catch anything that arrived during
+// the beam itself, with no added latency when nothing did. An already-settled
+// fleet exits on the first pass: nothing new, quiet window elapsed.
+//
+// The tail never extends the beam: late arrivals are measured local→X only
+// (depth 1) and folded into Levels[0]. Rescuing a late arrival behind a
+// working relay is what re-running a deep sweep after settle is for.
+func (r *Router) fullProbeTopUp(ctx context.Context, fp *fullProbeRun, spec core.FullProbeSpec, byID map[string]core.Outbound, tried map[string]bool) {
+	if len(r.cfg.Providers()) == 0 || spec.CatchupSeconds <= 0 {
+		r.fullProbeTopUpPass(ctx, fp, spec, byID, tried, true)
+		return
+	}
+	tick, quiet := r.catchupTickDur, r.catchupQuietDur
+	if tick <= 0 {
+		tick = fullProbeCatchupTick
+	}
+	if quiet <= 0 {
+		quiet = fullProbeCatchupQuiet
+	}
+	deadline := time.Now().Add(time.Duration(spec.CatchupSeconds) * time.Second)
+	for {
+		n := r.fullProbeTopUpPass(ctx, fp, spec, byID, tried, false)
+		if ctx.Err() != nil {
+			return
+		}
+		fp.mu.Lock()
+		total := fp.job.TotalAttempts
+		fp.mu.Unlock()
+		if total >= spec.MaxTotalAttempts {
+			return // attempt budget dry
+		}
+		r.mu.RLock()
+		changed := r.fleetChangedAt
+		r.mu.RUnlock()
+		now := time.Now()
+		if n == 0 && now.Sub(changed) >= quiet {
+			// Fleet settled: nothing live is untried. The quiet clock only
+			// starts once the fleet stops changing, and any cap overflow is
+			// re-offered on the next tick (n>0) long before the quiet window
+			// elapses — so there is nothing left to account for here.
+			return // fleet settled
+		}
+		if !now.Before(deadline) {
+			// Bound expired. Account for whatever the tail never got to so
+			// the record stays honest: coverage is partial and the counters
+			// say so (Candidates = whole observed fleet, Skipped = unprobed).
+			r.fullProbeSkipRest(fp, byID, tried)
+			return
+		}
+		timer := time.NewTimer(tick)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		}
+	}
+}
+
+// fullProbeSkipRest accounts for live outbounds the tail never issued (the
+// bound expired mid-burst): marks them tried and Skipped without probing, so
+// Candidates covers the whole observed fleet and the cut is visible.
+func (r *Router) fullProbeSkipRest(fp *fullProbeRun, byID map[string]core.Outbound, tried map[string]bool) {
+	skipped := 0
+	for _, o := range r.fullProbeOutbounds() {
+		if !tried[o.ID()] {
+			byID[o.ID()] = o
+			tried[o.ID()] = true
+			skipped++
+		}
+	}
+	if skipped == 0 {
+		return
+	}
+	fp.mu.Lock()
+	if len(fp.job.Levels) > 0 {
+		fp.job.Levels[0].Skipped += skipped
+		fp.job.Levels[0].Candidates = len(tried)
+	}
+	fp.mu.Unlock()
+	r.persistFullProbe(fp, true)
+}
+
+// fullProbeTopUpPass probes every live outbound never offered at depth 1 and
+// folds the results into level 1 (the beam's depth-1 record): planned/skipped
+// counters, fastest-first success paths re-capped at the beam width, and
+// failures aggregated by ID. It returns how many new outbounds it took in
+// (0 = the fleet has nothing new). byID and tried are add-only and owned by
+// the runner goroutine; the level's workers join before the merge, so the
+// maps are never mutated concurrently with a dial.
+//
+// final marks the last pass (static fleet or opted-out tail): there is no
+// next tick, so every cap-cut is final and honestly Skipped. On a non-final
+// pass the per-pass allowance (MaxAttemptsPerLevel) resets next tick, so a
+// burst larger than one pass is re-offered later while the TOTAL budget has
+// room — only a dry total budget makes the cut permanent.
+func (r *Router) fullProbeTopUpPass(ctx context.Context, fp *fullProbeRun, spec core.FullProbeSpec, byID map[string]core.Outbound, tried map[string]bool, final bool) int {
+	if ctx.Err() != nil {
+		return 0
+	}
+	live := r.fullProbeOutbounds()
+	var fresh []core.Outbound
+	for _, o := range live {
+		if !tried[o.ID()] {
+			fresh = append(fresh, o)
+		}
+	}
+	if len(fresh) == 0 {
+		return 0
+	}
+	fp.mu.Lock()
+	if len(fp.job.Levels) == 0 {
+		// Defensive: an un-canceled beam always records level 1 before it
+		// can exit, so there is nothing to fold into only in a state the
+		// ctx check above already rules out.
+		fp.mu.Unlock()
+		return 0
+	}
+	total := fp.job.TotalAttempts
+	fp.mu.Unlock()
+	remain := spec.MaxTotalAttempts - total
+	budget := spec.MaxAttemptsPerLevel
+	if remain < budget {
+		budget = remain
+	}
+	attempts := make([]fullProbeAttempt, 0, len(fresh))
+	skipped := 0
+	for _, o := range fresh {
+		if budget <= 0 {
+			if final || remain <= 0 {
+				// No next pass, or the total budget is dry: the cut is
+				// final — mark the rest tried and honestly Skipped.
+				byID[o.ID()] = o
+				tried[o.ID()] = true
+				skipped++
+			}
+			// Otherwise the per-pass allowance resets next tick: leave the
+			// overflow untried so a later pass re-offers it.
+			continue
+		}
+		byID[o.ID()] = o
+		tried[o.ID()] = true
+		attempts = append(attempts, fullProbeAttempt{cand: o.ID()})
+		budget--
+		remain--
+	}
+	fp.mu.Lock()
+	l := &fp.job.Levels[0]
+	l.Total += len(attempts)
+	l.Skipped += skipped
+	l.Candidates = len(tried)
+	fp.mu.Unlock()
+	r.persistFullProbe(fp, true)
+	if len(attempts) == 0 {
+		return len(fresh)
+	}
+
+	// li=0: the level's workers fold Done/Success/Failed/TotalAttempts (and
+	// any cancel-cut Skipped) into Levels[0] exactly as they did for the
+	// beam's depth-1 pass.
+	successes, failures := r.runFullProbeLevel(ctx, fp, spec, 0, attempts, byID, fp.job.ID)
+	fp.mu.Lock()
+	l = &fp.job.Levels[0]
+	l.SuccessPaths = mergeFullProbePaths(l.SuccessPaths, successes, spec.MaxPathsPerLevel)
+	l.FailedItems = mergeFullProbeFailedItems(l.FailedItems, failures)
+	l.FinishedAt = time.Now()
+	fp.mu.Unlock()
+	r.persistFullProbe(fp, true)
+	return len(fresh)
+}
+
+// fullProbePathFaster orders paths fastest first, ties by hop-join — the
+// beam's ordering, shared by the level cap and the top-up merge.
+func fullProbePathFaster(a, b core.FullProbePath) bool {
+	if a.Latency != b.Latency {
+		return a.Latency < b.Latency
+	}
+	return strings.Join(a.Hops, ">") < strings.Join(b.Hops, ">")
+}
+
+// mergeFullProbePaths merges a top-up pass's successes into the level's
+// existing record, fastest first, re-capped at the beam width. A late path
+// can displace an earlier one from the capped record; the displaced path's
+// attempt row stays durable in the results view, and deeper levels already
+// ran with the prefixes they had.
+func mergeFullProbePaths(existing, add []core.FullProbePath, max int) []core.FullProbePath {
+	if len(existing)+len(add) == 0 {
+		return existing
+	}
+	out := make([]core.FullProbePath, 0, len(existing)+len(add))
+	out = append(out, existing...)
+	out = append(out, add...)
+	sort.Slice(out, func(i, j int) bool { return fullProbePathFaster(out[i], out[j]) })
+	if len(out) > max {
+		out = out[:max]
+	}
+	return out
+}
+
+// mergeFullProbeFailedItems merges a top-up pass's failures into the level's
+// aggregate, sorted by ID. Fresh IDs never overlap the beam's (tried keeps
+// depth-1 issuance unique); the combine branch is defensive.
+func mergeFullProbeFailedItems(existing, add []core.FullProbeFailedItem) []core.FullProbeFailedItem {
+	if len(existing)+len(add) == 0 {
+		return existing
+	}
+	byID := make(map[string]*core.FullProbeFailedItem, len(existing)+len(add))
+	for _, f := range existing {
+		cp := f
+		byID[f.ID] = &cp
+	}
+	for _, f := range add {
+		if e, ok := byID[f.ID]; ok {
+			e.Count += f.Count
+			e.Reason, e.Error = f.Reason, f.Error
+			if f.Address != "" {
+				e.Address = f.Address
+			}
+			continue
+		}
+		cp := f
+		byID[f.ID] = &cp
+	}
+	out := make([]core.FullProbeFailedItem, 0, len(byID))
+	for _, f := range byID {
+		out = append(out, *f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // fullProbeResolvable reports whether every hop of prefix+cand still exists
@@ -522,12 +791,7 @@ func (r *Router) runFullProbeLevel(ctx context.Context, fp *fullProbeRun, spec c
 
 	// Beam: keep the fastest paths as next-level prefixes, and as what
 	// inbound creation builds from.
-	sort.Slice(successes, func(i, j int) bool {
-		if successes[i].Latency != successes[j].Latency {
-			return successes[i].Latency < successes[j].Latency
-		}
-		return strings.Join(successes[i].Hops, ">") < strings.Join(successes[j].Hops, ">")
-	})
+	sort.Slice(successes, func(i, j int) bool { return fullProbePathFaster(successes[i], successes[j]) })
 	if len(successes) > spec.MaxPathsPerLevel {
 		successes = successes[:spec.MaxPathsPerLevel]
 	}

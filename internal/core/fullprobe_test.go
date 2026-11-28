@@ -29,6 +29,9 @@ func TestNormalizeFullProbeSpecDefaults(t *testing.T) {
 		s.MaxTotalAttempts != DefaultFullProbeTotalAttempts {
 		t.Errorf("fan-out defaults not applied: %+v", s)
 	}
+	if s.CatchupSeconds != DefaultFullProbeCatchupSeconds {
+		t.Errorf("CatchupSeconds = %d, want default %d", s.CatchupSeconds, DefaultFullProbeCatchupSeconds)
+	}
 }
 
 func TestNormalizeFullProbeSpecCaps(t *testing.T) {
@@ -61,6 +64,37 @@ func TestNormalizeFullProbeSpecCaps(t *testing.T) {
 		s.MaxPathsPerLevel != FullProbeMaxPathsPerLevel ||
 		s.MaxTotalAttempts != FullProbeMaxTotalAttempts {
 		t.Errorf("fan-out caps not applied: %+v", s)
+	}
+}
+
+func TestNormalizeFullProbeSpecCatchup(t *testing.T) {
+	// Above the cap clamps down; negative disables the tail and normalizes
+	// to -1 (a fixed point, so the stored spec round-trips); a positive
+	// value under the cap passes through unchanged.
+	for _, tc := range []struct {
+		in, want int
+	}{
+		{FullProbeMaxCatchupSeconds + 1000, FullProbeMaxCatchupSeconds},
+		{-1, -1},
+		{-9999, -1},
+		{120, 120},
+	} {
+		s, err := NormalizeFullProbeSpec(FullProbeSpec{Target: "http://x.com", CatchupSeconds: tc.in})
+		if err != nil {
+			t.Fatalf("normalize(%d): %v", tc.in, err)
+		}
+		if s.CatchupSeconds != tc.want {
+			t.Errorf("CatchupSeconds(%d) = %d, want %d", tc.in, s.CatchupSeconds, tc.want)
+		}
+		// Normalization must be idempotent: re-normalizing a stored spec
+		// (e.g. a client replaying it) must not change the tail behavior.
+		again, err := NormalizeFullProbeSpec(s)
+		if err != nil {
+			t.Fatalf("re-normalize(%d): %v", tc.in, err)
+		}
+		if again.CatchupSeconds != s.CatchupSeconds {
+			t.Errorf("CatchupSeconds(%d) not a fixed point: %d -> %d", tc.in, s.CatchupSeconds, again.CatchupSeconds)
+		}
 	}
 }
 

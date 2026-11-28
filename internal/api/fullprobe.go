@@ -60,6 +60,11 @@ type fullProbeRunRequest struct {
 	MaxPathsPerLevel int `json:"max_paths_per_level,omitempty"`
 	// MaxTotalAttempts caps the whole job. Default 100000.
 	MaxTotalAttempts int `json:"max_total_attempts,omitempty"`
+	// CatchupSeconds bounds the post-sweep settling tail that probes
+	// outbounds registered after the job started (provider fleets grow for
+	// minutes) at depth 1, folding them into level 1. Default 600; must be
+	// -1..900 (-1 disables the tail; one final top-up pass still runs).
+	CatchupSeconds int `json:"catchup_seconds,omitempty"`
 }
 
 // fullProbes dispatches /api/probes/full: POST starts a job, GET lists jobs.
@@ -226,7 +231,7 @@ func (s *Server) fullProbeResults(w http.ResponseWriter, r *http.Request, id str
 // startFullProbe godoc
 //
 //	@Summary      Start a full active probing job
-//	@Description  Launches a multi-level sweep that discovers which proxy paths reach the target: level 1 probes local → every outbound (successes A, failures B); level 2 probes local → a → b for every a ∈ A, b ∈ B (successes C, failures D); level 3 extends the surviving paths with the new failures, and so on up to max_depth (5). Every attempt is a real HTTP request through the pinned path, so a success proves the whole chain proxies. The job runs detached; poll GET /api/probes/full/{id} for per-level progress and success paths, then POST /api/probes/full/{id}/inbounds to turn them into chains + inbounds. rps caps the probe request rate (up to 10000); concurrency, max_attempts_per_level, max_paths_per_level (the beam of fastest paths kept per level) and max_total_attempts bound the fan-out. At most two sweeps run at once; a start beyond that answers 409 until one finishes.
+//	@Description  Launches a multi-level sweep that discovers which proxy paths reach the target: level 1 probes local → every outbound (successes A, failures B); level 2 probes local → a → b for every a ∈ A, b ∈ B (successes C, failures D); level 3 extends the surviving paths with the new failures, and so on up to max_depth (5). Every attempt is a real HTTP request through the pinned path, so a success proves the whole chain proxies. Provider fleets keep growing for minutes after a start (server lists download in bursts), so after the sweep a bounded settling tail keeps probing outbounds registered late at depth 1 — folding them into level 1 — until the fleet has been quiet for a while or catchup_seconds expires (default 600, max 900; -1 disables the tail, one final top-up pass still runs; engines without providers take only that final pass). Late arrivals are measured at depth 1 only. The job runs detached; poll GET /api/probes/full/{id} for per-level progress and success paths, then POST /api/probes/full/{id}/inbounds to turn them into chains + inbounds. rps caps the probe request rate (up to 10000); concurrency, max_attempts_per_level, max_paths_per_level (the beam of fastest paths kept per level) and max_total_attempts bound the fan-out. At most two sweeps run at once; a start beyond that answers 409 until one finishes.
 //	@Tags         probes
 //	@Accept       json
 //	@Produce      json
@@ -255,6 +260,12 @@ func (s *Server) fullProbeStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, errResponse{"timeout_seconds out of range"}, http.StatusBadRequest)
 		return
 	}
+	// -1 is the explicit tail opt-out; the runner normalizes 0 to the
+	// default bound and clamps anything above the cap.
+	if req.CatchupSeconds < -1 || req.CatchupSeconds > core.FullProbeMaxCatchupSeconds {
+		writeJSON(w, errResponse{"catchup_seconds out of range"}, http.StatusBadRequest)
+		return
+	}
 	spec := core.FullProbeSpec{
 		Target:              req.Target,
 		Method:              req.Method,
@@ -267,6 +278,7 @@ func (s *Server) fullProbeStart(w http.ResponseWriter, r *http.Request) {
 		MaxAttemptsPerLevel: req.MaxAttemptsPerLevel,
 		MaxPathsPerLevel:    req.MaxPathsPerLevel,
 		MaxTotalAttempts:    req.MaxTotalAttempts,
+		CatchupSeconds:      req.CatchupSeconds,
 	}
 	j, err := s.full.StartFullProbe(spec)
 	if err != nil {

@@ -51,6 +51,11 @@ type Router struct {
 	// such requests so its round-robin counter advances per request instead
 	// of resetting to 0 (which would always pick the first outbound).
 	fallback *fallbackSelector
+	// fleetChangedAt records when the built outbound ID set last changed
+	// (mu-protected; boot counts as a change). The full-probe settling tail
+	// reads it to tell a still-growing provider fleet from a settled one.
+	// Same-ID config churn does not reset it — only the ID set matters.
+	fleetChangedAt time.Time
 
 	// probeCtl runs the reachability probe loop; reachability verdicts
 	// themselves live in the metrics store (probe rows + successful first
@@ -73,6 +78,11 @@ type Router struct {
 	// persistFullProbe. Tests override it to inject transient store failures
 	// without disk tricks; production never reassigns it.
 	persistFullProbeFn func(fp *fullProbeRun, force bool) error
+	// catchupTickDur/catchupQuietDur override the full-probe settling tail's
+	// tick and quiet window (zero = the fullProbeCatchup* constants). Tests
+	// shrink them to millisecond scale; production never reassigns them.
+	catchupTickDur  time.Duration
+	catchupQuietDur time.Duration
 	// shutdown closes when stopFullProbes begins joining, so a runner
 	// retrying its terminal persist bails instead of holding Close open for
 	// another backoff tick. shutdownOnce keeps the close idempotent — Close
@@ -114,15 +124,16 @@ type builtPool struct {
 // outbounds that need to reach their own server.
 func New(cfg *config.Store, ms *metrics.Store, stk stack.Stack) *Router {
 	r := &Router{
-		cfg:         cfg,
-		metrics:     ms,
-		stack:       stk,
-		outbounds:   map[string]core.Outbound{},
-		pools:       map[string]*builtPool{},
-		chains:      map[string]core.Chain{},
-		fallback:    &fallbackSelector{},
-		shutdown:    make(chan struct{}),
-		copyBufPool: sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }},
+		cfg:            cfg,
+		metrics:        ms,
+		stack:          stk,
+		outbounds:      map[string]core.Outbound{},
+		pools:          map[string]*builtPool{},
+		chains:         map[string]core.Chain{},
+		fallback:       &fallbackSelector{},
+		fleetChangedAt: time.Now(),
+		shutdown:       make(chan struct{}),
+		copyBufPool:    sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }},
 	}
 	r.persistFullProbeFn = r.persistFullProbe
 	r.rebuild()
@@ -175,6 +186,7 @@ func (r *Router) rebuild() {
 	chains := r.cfg.Chains()
 
 	// build outbounds
+	old := r.outbounds
 	r.outbounds = map[string]core.Outbound{}
 	for _, spec := range r.cfg.Outbounds() {
 		// Inject the engine stack dialer so outbound plugins reach their own
@@ -204,6 +216,20 @@ func (r *Router) rebuild() {
 		}
 		// wrap with stats + id
 		r.outbounds[spec.ID] = &outboundWrapper{Outbound: o, id: spec.ID, protocol: spec.Protocol, ms: r.metrics, pinOnly: spec.PinOnly()}
+	}
+	// Track outbound ID-set changes for the full-probe settling tail: a
+	// provider poll that adds or removes outbounds resets the quiet clock.
+	// Equal length plus every new ID present in old means identical sets;
+	// value-only churn (same IDs, new configs) deliberately does not reset.
+	if len(r.outbounds) != len(old) {
+		r.fleetChangedAt = time.Now()
+	} else {
+		for id := range r.outbounds {
+			if _, ok := old[id]; !ok {
+				r.fleetChangedAt = time.Now()
+				break
+			}
+		}
 	}
 	// build pools (from the epoch snapshot — see top of rebuild)
 	r.pools = map[string]*builtPool{}

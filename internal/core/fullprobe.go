@@ -15,6 +15,12 @@
 //  5. the successful paths (local→A, local→A→C, local→A→C→E, ...) are what
 //     POST /api/probes/full/{id}/inbounds turns into chains + inbounds.
 //
+// Provider fleets keep growing for minutes after a sweep starts (server lists
+// download in bursts), so after the level loop a bounded, cancelable settling
+// tail probes outbounds that registered late at depth 1 and folds them into
+// level 1 — until the fleet has been quiet for a while or CatchupSeconds
+// expires. Static fleets (no providers) take only one final top-up pass.
+//
 // Every attempt is a real HTTP request toward the target through the pinned
 // path — the same dial machinery dispatch uses (dialHops), so a success
 // proves the whole chain proxies, not just that a server answers TCP.
@@ -73,6 +79,11 @@ const (
 	// apply call turns into pool member chains. Members share a single
 	// inbound listener, so the ceiling is on selection breadth, not ports.
 	FullProbeMaxApplyPoolMembers = 256
+	// FullProbeMaxCatchupSeconds caps the post-sweep settling tail that keeps
+	// probing outbounds registered after the job started. Provider fleets grow
+	// over minutes as server lists download in bursts, so a sweep that only
+	// measured the start-time fleet would under-report depth-1 coverage.
+	FullProbeMaxCatchupSeconds = 900
 
 	// Defaults for an omitted spec field.
 	DefaultFullProbeDepth            = 5
@@ -81,6 +92,7 @@ const (
 	DefaultFullProbeAttemptsPerLevel = 10000
 	DefaultFullProbePathsPerLevel    = 256
 	DefaultFullProbeTotalAttempts    = 100000
+	DefaultFullProbeCatchupSeconds   = 600
 )
 
 // FullProbeSpec describes one full active probing job. The zero value probes
@@ -116,6 +128,16 @@ type FullProbeSpec struct {
 	// MaxTotalAttempts caps the whole job. Zero uses
 	// DefaultFullProbeTotalAttempts.
 	MaxTotalAttempts int `json:"max_total_attempts,omitempty"`
+	// CatchupSeconds bounds the post-sweep settling tail: while a provider
+	// fleet keeps growing, the job keeps probing newly registered outbounds at
+	// depth 1 (folding them into level 1) until the fleet has been quiet for a
+	// while or the bound expires. Zero uses DefaultFullProbeCatchupSeconds;
+	// negative disables the tail (one final top-up pass still runs) and
+	// normalizes to -1 so the stored spec is a fixed point — re-normalizing it
+	// must not turn the opt-out back into the default. Capped at
+	// FullProbeMaxCatchupSeconds. Engines without providers skip the tail and
+	// take only the final pass. Late arrivals are measured at depth 1 only.
+	CatchupSeconds int `json:"catchup_seconds,omitempty"`
 }
 
 // NormalizeFullProbeSpec validates the target and applies defaults and caps,
@@ -172,6 +194,18 @@ func NormalizeFullProbeSpec(spec FullProbeSpec) (FullProbeSpec, error) {
 	if spec.MaxTotalAttempts > FullProbeMaxTotalAttempts {
 		spec.MaxTotalAttempts = FullProbeMaxTotalAttempts
 	}
+	switch {
+	case spec.CatchupSeconds == 0:
+		spec.CatchupSeconds = DefaultFullProbeCatchupSeconds
+	case spec.CatchupSeconds < 0:
+		// Tail off; one final top-up pass still runs. Keep -1 (not 0): 0 is
+		// the default-me sentinel, so normalizing to 0 would make the stored
+		// spec non-idempotent — omitempty would drop it and a re-normalize
+		// would silently re-enable the 600s tail.
+		spec.CatchupSeconds = -1
+	case spec.CatchupSeconds > FullProbeMaxCatchupSeconds:
+		spec.CatchupSeconds = FullProbeMaxCatchupSeconds
+	}
 	return spec, nil
 }
 
@@ -211,10 +245,15 @@ type FullProbeLevel struct {
 	// Prefixes is how many successful paths from the previous level were
 	// extended (1 at depth 1: the empty local prefix).
 	Prefixes int `json:"prefixes"`
-	// Candidates is how many distinct outbounds were tried as the last hop.
+	// Candidates is how many distinct last-hop outbounds were observed —
+	// offered to the sweep, whether probed or honestly skipped. The settling
+	// tail's deadline cut accounts for never-probed outbounds here too, so
+	// Candidates covers the whole observed fleet even on a partial sweep.
 	Candidates int `json:"candidates"`
 	// Total is the planned attempt count after the fan-out caps; Skipped
-	// counts the pairs the caps (or a cancel) cut.
+	// counts the prefix×candidate pairs cut without an attempt — by the
+	// fan-out caps, a cancel, or the settling tail's expired bound (depth 1
+	// pairs are single outbounds).
 	Total   int `json:"total"`
 	Skipped int `json:"skipped,omitempty"`
 	// Done is how many attempts finished (success or failure).

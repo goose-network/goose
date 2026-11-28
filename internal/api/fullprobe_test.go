@@ -136,6 +136,7 @@ func TestFullProbeStartDecodesSpec(t *testing.T) {
 		"headers": map[string]string{"X-T": "1"}, "body": `{"a":1}`,
 		"timeout_seconds": 7, "max_depth": 3, "rps": 5000, "concurrency": 64,
 		"max_attempts_per_level": 500, "max_paths_per_level": 32, "max_total_attempts": 9000,
+		"catchup_seconds": 120,
 	})
 	require.Equal(t, http.StatusCreated, code, string(body))
 	var j core.FullProbeJob
@@ -156,6 +157,7 @@ func TestFullProbeStartDecodesSpec(t *testing.T) {
 	assert.Equal(t, 500, s.MaxAttemptsPerLevel)
 	assert.Equal(t, 32, s.MaxPathsPerLevel)
 	assert.Equal(t, 9000, s.MaxTotalAttempts)
+	assert.Equal(t, 120, s.CatchupSeconds)
 }
 
 // TestFullProbeStartRejections covers the start endpoint's failure surface:
@@ -186,6 +188,26 @@ func TestFullProbeStartRejections(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, code, "negative timeout_seconds")
 	code, _ = do(t, hs, "POST", "/api/probes/full", "", map[string]any{"target": "http://x.com", "timeout_seconds": 61})
 	assert.Equal(t, http.StatusBadRequest, code, "timeout_seconds past the cap")
+
+	// catchup_seconds: -1 is the explicit tail opt-out, 0 the default, and the
+	// cap is enforced; anything below -1 or above the cap is a bad request.
+	optOut := &fakeFullRunner{}
+	hsOpt, _, _ := newFullProbeServer(t, optOut)
+	code, optBody := do(t, hsOpt, "POST", "/api/probes/full", "", map[string]any{"target": "http://x.com", "catchup_seconds": -1})
+	assert.Equal(t, http.StatusCreated, code, "-1 disables the settling tail")
+	// The opt-out must reach the runner verbatim (the runner normalizes it to
+	// the -1 fixed point, not to 0 — 0 means "default 600s tail").
+	optOut.mu.Lock()
+	require.Len(t, optOut.specs, 1)
+	assert.Equal(t, -1, optOut.specs[0].CatchupSeconds, "API must forward the -1 opt-out verbatim")
+	optOut.mu.Unlock()
+	var optJob core.FullProbeJob
+	require.NoError(t, json.Unmarshal(optBody, &optJob))
+	assert.Equal(t, -1, optJob.Spec.CatchupSeconds, "the 201 snapshot must show the opt-out, not an omitted/default field")
+	code, _ = do(t, hs, "POST", "/api/probes/full", "", map[string]any{"target": "http://x.com", "catchup_seconds": -2})
+	assert.Equal(t, http.StatusBadRequest, code, "catchup_seconds below -1")
+	code, _ = do(t, hs, "POST", "/api/probes/full", "", map[string]any{"target": "http://x.com", "catchup_seconds": core.FullProbeMaxCatchupSeconds + 1})
+	assert.Equal(t, http.StatusBadRequest, code, "catchup_seconds past the cap")
 }
 
 // TestFullProbeGetListCancel covers the job views: GET serves the live
